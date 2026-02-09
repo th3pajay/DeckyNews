@@ -1,9 +1,8 @@
 # DeckyNews
-Technical LLM test and integration prototype within the SteamOS / Decky ecosystem
 
-Functionally a new summarization tool, using localized LLM on the SteamOS / Deckky plugin framework, raelizing wide array of telemetry on LLM usage metrics to measure and address valid concerns on resource LLM parasitism, thermal and battery load.
+Functionally a new summarization tool, using localized LLM on the SteamOS / Deckky plugin framework, realizing wide array of telemetry on LLM usage metrics to measure and address valid concerns on resource LLM parasitism, thermal and battery loads.
 
-With transparent metrics, local implementation provides the latest scraped gaming news in the Decky / Quick Access Menu under DeckyNews, optionally providing a one-button click to summarize them better and without hype, marketing and within configurable length of TL;DR.
+With transparent metrics, local implementation provides the latest scraped gaming news in the Decky / Quick Access Menu under "DeckyNews", optionally providing a one-button click to summarize them better and without hype, marketing and within configurable length of a TL;DR.
 
 My initial, local aim was to fight 'fire with fire' citing most of the news are quite verbose and algorithmically-optimized in their delivery, so I wanted to compress these articles into a better defined, shorter, locally governed summaries.
 
