@@ -1,0 +1,11 @@
+{
+  "name": "DeckyNews",
+  "author": "th3pajay",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["news", "gaming", "quick-access"],
+    "description": "Gaming news aggregator for Steam Deck",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}

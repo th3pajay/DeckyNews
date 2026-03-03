@@ -1,0 +1,182 @@
+"""LLM inference using llamafile/llama.cpp subprocess."""
+
+import os
+import signal
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+
+class LlamaCppSubprocess:
+    """Run llama.cpp via subprocess using llamafile or llama-cli binary."""
+
+    def __init__(self, binary_path: Optional[str] = None, model_path: Optional[str] = None):
+        self.binary_path = binary_path or self._find_binary()
+        self.model_path = model_path
+
+        if self.binary_path is None:
+            raise FileNotFoundError("Could not find llama.cpp binary")
+
+    def _find_binary(self) -> Optional[str]:
+        """Find llamafile or llama-cli binary and ensure it's executable."""
+        plugin_dir = Path(__file__).parent.parent
+
+        candidates = [
+            plugin_dir / "bin" / "llamafile",
+            plugin_dir / "bin" / "llamafile-0.9.3",
+            Path.home() / "homebrew" / "plugins" / "DeckyNews" / "bin" / "llamafile",
+            plugin_dir / "bin" / "llama-cli",
+            plugin_dir / "bin" / "main",
+            Path.home() / "homebrew" / "plugins" / "DeckyNews" / "bin" / "llama-cli",
+            Path("/usr/local/bin/llama-cli"),
+        ]
+
+        for path in candidates:
+            if not path.exists():
+                continue
+
+            is_executable = os.access(path, os.X_OK)
+
+            if not is_executable:
+                try:
+                    import stat
+                    current_mode = path.stat().st_mode
+                    path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+                    if os.access(path, os.X_OK):
+                        print(f"[LlamaInference] Fixed permissions for {path}")
+                        return str(path)
+                except (OSError, PermissionError):
+                    continue
+            else:
+                return str(path)
+
+        return None
+
+    def summarize(self, text: str, max_tokens: int = 150, system_prompt: str = None, n_threads: int = 2, prompt_override: Optional[str] = None, n_ctx: int = 1024) -> dict:
+        """
+        Summarize text using llama.cpp.
+
+        Args:
+            text: Article text to summarize
+            max_tokens: Maximum tokens to generate
+            system_prompt: System prompt for ChatML format (ignored when prompt_override is set)
+            n_threads: Number of CPU threads to use
+            prompt_override: If provided, use this raw prompt instead of building ChatML format
+            n_ctx: Context size in tokens (model-specific)
+
+        Returns:
+            dict with keys:
+                - summary: str (the generated summary text)
+                - tps: float (tokens per second during eval)
+                - ttft: float (time to first token in ms)
+                - prompt_eval_time: float (prompt processing time in ms)
+                - total_tokens: int (total tokens generated)
+                - stop_reason: str ('stop', 'length', 'error')
+        """
+        if self.model_path is None:
+            raise ValueError("Model path not set")
+
+        if prompt_override is not None:
+            # Use caller-supplied raw prompt (e.g. completion format for base models)
+            prompt = prompt_override
+        else:
+            # Build ChatML format for instruction-tuned models
+            if system_prompt is None:
+                system_prompt = "You are a gaming news summarizer. Summarize in 2-3 sentences."
+
+            prompt = f"""<|im_start|>system
+{system_prompt}<|im_end|>
+<|im_start|>user
+Summarize this article:
+
+{text[:2500]}<|im_end|>
+<|im_start|>assistant
+"""
+
+        cmd = [
+            self.binary_path,
+            "-m", self.model_path,
+            "-p", prompt,
+            "-n", str(max_tokens),
+            "--temp", "0.0",
+            "-ngl", "0",
+            "-t", str(n_threads),
+            "-c", str(n_ctx),
+            "--repeat-penalty", "1.15",
+            "--no-display-prompt",
+        ]
+
+        env = os.environ.copy()
+        bin_dir = str(Path(self.binary_path).parent)
+        is_llamafile = "llamafile" in Path(self.binary_path).name
+
+        if is_llamafile:
+            cmd = ["/bin/sh", self.binary_path] + cmd[1:]
+            print(f"[LlamaInference] Using /bin/sh wrapper for llamafile APE binary")
+            env["LD_LIBRARY_PATH"] = "/usr/lib:/usr/lib64"
+            env.pop("LD_PRELOAD", None)
+            print(f"[LlamaInference] Using sanitized System-First environment for llamafile")
+        else:
+            env["LD_LIBRARY_PATH"] = f"{bin_dir}:{env.get('LD_LIBRARY_PATH', '')}"
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding='utf-8',
+            errors='replace',
+            start_new_session=True,
+            env=env
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.communicate()
+            raise TimeoutError("Summarization timed out")
+
+        if proc.returncode == 0:
+            output = stdout.strip()
+            if "<|im_end|>" in output:
+                output = output.split("<|im_end|>")[0].strip()
+
+            metrics = self._parse_timing_metrics(stderr)
+            metrics['summary'] = output
+            # For ChatML the stop token is <|im_end|>; for completion it's end-of-generation
+            metrics['stop_reason'] = 'stop' if ('<|im_end|>' in stdout or prompt_override is not None) else 'length'
+
+            return metrics
+        else:
+            raise RuntimeError(f"llama.cpp failed: {stderr}")
+
+    def _parse_timing_metrics(self, stderr: str) -> dict:
+        """Parse llamafile timing lines from stderr into a metrics dict."""
+        import re
+
+        metrics = {
+            'tps': None,
+            'ttft': None,
+            'prompt_eval_time': None,
+            'total_tokens': None,
+            'load_duration': None,
+        }
+
+        tps_match = re.search(r'eval time.*?(\d+\.\d+)\s+tokens per second', stderr)
+        if tps_match:
+            metrics['tps'] = float(tps_match.group(1))
+
+        prompt_eval_match = re.search(r'prompt eval time\s+=\s+(\d+\.\d+)\s+ms', stderr)
+        if prompt_eval_match:
+            metrics['prompt_eval_time'] = float(prompt_eval_match.group(1))
+            metrics['ttft'] = float(prompt_eval_match.group(1))
+
+        total_tokens_match = re.search(r'total time.*?/\s+(\d+)\s+tokens', stderr)
+        if total_tokens_match:
+            metrics['total_tokens'] = int(total_tokens_match.group(1))
+
+        load_match = re.search(r'load time\s+=\s+(\d+\.\d+)\s+ms', stderr)
+        if load_match:
+            metrics['load_duration'] = float(load_match.group(1)) / 1000.0
+
+        return metrics
