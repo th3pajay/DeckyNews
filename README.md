@@ -1,6 +1,14 @@
 # DeckyNews
 
-Gaming news aggregator for Steam Deck's Decky Loader with optional on-device AI summarization. Fetches RSS feeds from six sources, deduplicates articles, caches them locally, and runs a quantized LLM entirely on the device — no cloud, no account.
+Experimental gaming news aggregator for Steam Deck's Decky Loader with optional on-device AI summarization. Fetches RSS feeds from six sources, deduplicates articles, caches them locally, and runs a quantized LLM entirely on the device — no cloud, no account.
+
+*Respecting Decky Team approach on LLM usage, this solely remains a technical **experiment**. Use at your own risk. You have been **warned**.*
+
+
+<img height="250" src="\Media\QAM01.png" width="200"/>
+<img height="250" src="\Media\QAM02_settings.png" width="200"/>
+<img height="250" src="\Media\QAM03_summary_metrics.png" width="200"/>
+
 
 ---
 
@@ -479,7 +487,7 @@ Each source has an independent circuit breaker (3 failures → 5-minute pause).
 
 ### From Plugin Store
 
-*Coming soon — plugin will be submitted to the Decky Plugin Database.*
+*Not planned*
 
 ### Manual Installation
 
