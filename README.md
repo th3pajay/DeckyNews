@@ -207,7 +207,7 @@ plugin_loader starts main.py
 | Strict mode | `noImplicitAny`, `noUnusedLocals`, `noImplicitReturns`, `strict: true` |
 | Rendering | Client-side only — no SSR |
 | State | `useState` / `useEffect` hooks, no external store |
-| Pagination | 10 articles/page, L1/R1 navigation |
+| Pagination | 10 articles/page, L2/R2 trigger navigation |
 
 **Key components:**
 
@@ -396,6 +396,7 @@ summarize_article() called
 
 | Metric | Description |
 |---|---|
+| `model_id` | Model used for this inference session |
 | `tps` | Tokens per second |
 | `ttft` | Time to first token (ms) |
 | `cpu_temp` | °C at inference start |
@@ -457,6 +458,8 @@ DeckyNews.zip
 |---|---|---|---|---|---|---|---|
 | `qwen2.5-0.5b` | Qwen2.5-0.5B | 352 MB | ChatML | 1024 | 150 | 15s | Default |
 | `mobilellm-600m` | MobileLLM-600M | 430 MB | Completion | 2048 | 120 | 20s | Experimental |
+| `llama3.2-1b` | Llama 3.2-1B | 700 MB | Llama3 | 2048 | 150 | 20s | |
+| `qwen3-0.6b` | Qwen3-0.6B | 400 MB | ChatML (no-think) | 2048 | 150 | 20s | |
 
 Models are downloaded on first use from HuggingFace Hub to:
 `~/.local/share/DeckyPlugins/deckynews/runtime/models/{model_id}/`
@@ -509,7 +512,7 @@ Enable **AI Summaries** in Settings. The plugin automatically downloads the llam
 | Scroll articles | D-pad / left analog |
 | Open in browser | A button |
 | AI summarize | X button |
-| Next / prev page | R1 / L1 |
+| Next / prev page | R2 / L2 (triggers) |
 | Pull to refresh | Swipe down |
 | Long-press preview | Hold article (500ms default) |
 
@@ -572,7 +575,7 @@ chmod +x ~/.local/share/DeckyPlugins/deckynews/runtime/bin/llamafile
 
 ### LLM fails: `failed to load model`
 
-The GGUF architecture may be unsupported by the bundled llamafile version. Check the model ID in Settings — only `qwen2.5-0.5b` and `mobilellm-600m` are validated.
+The GGUF architecture may be unsupported by the bundled llamafile version. Check the model ID in Settings — `qwen2.5-0.5b`, `llama3.2-1b`, and `qwen3-0.6b` are validated against llamafile 0.9.3.
 
 ### LLM not running during games
 
@@ -662,3 +665,9 @@ BSD-3-Clause — see [LICENSE](LICENSE)
 ---
 
 **Privacy:** No external telemetry. All data stays on your device. LLM runs locally — no cloud APIs.
+
+---
+## Support
+If DeckyNews has saved you some time-to-read, consider supporting the project!
+
+<a href="https://www.buymeacoffee.com/th3pajay"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="160" height="45" alt="Buy Me A Coffee"></a>
