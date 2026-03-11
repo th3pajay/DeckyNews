@@ -1,6 +1,6 @@
 {
   "name": "deckynews",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Gaming news aggregator for Steam Deck",
   "type": "module",
   "scripts": {

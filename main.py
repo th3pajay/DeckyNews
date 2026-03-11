@@ -163,6 +163,28 @@ MODEL_CATALOG = {
         "timeout_seconds": 20,
         "experimental": True,
     },
+    "llama3.2-1b": {
+        "display_name": "Llama 3.2-1B",
+        "description": "Meta's 1B instruct model. Better reasoning than Qwen2.5-0.5B.",
+        "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "size_mb": 700,
+        "prompt_format": "llama3",
+        "n_ctx": 2048,
+        "max_gen_tokens": 150,
+        "timeout_seconds": 20,
+    },
+    "qwen3-0.6b": {
+        "display_name": "Qwen3-0.6B",
+        "description": "Newer Qwen generation. Thinking mode disabled.",
+        "repo": "bartowski/Qwen_Qwen3-0.6B-GGUF",
+        "filename": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
+        "size_mb": 400,
+        "prompt_format": "chatml_nothink",
+        "n_ctx": 2048,
+        "max_gen_tokens": 150,
+        "timeout_seconds": 20,
+    },
 }
 
 
@@ -1157,7 +1179,6 @@ class SummarizationManager:
                         n_ctx=active_cfg["n_ctx"],
                     )
                 else:
-                    # ChatML format for instruction-tuned models like Qwen
                     system_prompt = self._get_system_prompt(self.ai_personality)
                     return self._llm.summarize(
                         article_text,
@@ -1165,6 +1186,7 @@ class SummarizationManager:
                         system_prompt=system_prompt,
                         n_threads=effective_threads,
                         n_ctx=active_cfg["n_ctx"],
+                        prompt_format=active_cfg["prompt_format"],
                     )
 
             loop = asyncio.get_event_loop()
@@ -1788,7 +1810,7 @@ class Plugin:
                 "status": None
             }
 
-        session_id = self.telemetry.start_session(url)
+        session_id = self.telemetry.start_session(url, model_id=self.summarization_manager.selected_model)
 
         start_time = time.perf_counter()
         result = await self.summarization_manager.summarize_article(

@@ -6,7 +6,9 @@ import {
   ToggleField,
   SliderField,
   DropdownItem,
-  SingleDropdownOption
+  SingleDropdownOption,
+  GamepadButton,
+  GamepadEvent
 } from "@decky/ui";
 import {
   addEventListener,
@@ -172,6 +174,7 @@ interface HeatmapCell {
   id: number;
   timestamp: number;
   engine_type: string;
+  model_id: string | null;
   tps: number | null;
   ttft: number | null;
   prompt_eval_time: number | null;
@@ -704,7 +707,15 @@ const MetricInspector: FC<MetricInspectorProps> = ({ cell, onClose }) => {
     }
   ];
 
+  const MODEL_NAMES: Record<string, string> = {
+    "qwen2.5-0.5b": "Qwen2.5-0.5B",
+    "mobilellm-600m": "MobileLLM-600M",
+    "llama3.2-1b": "Llama 3.2-1B",
+    "qwen3-0.6b": "Qwen3-0.6B",
+  };
+
   const timestamp = new Date(cell.timestamp * 1000);
+  const modelLabel = cell.model_id ? (MODEL_NAMES[cell.model_id] ?? cell.model_id) : cell.engine_type;
 
   return (
     <div
@@ -737,7 +748,7 @@ const MetricInspector: FC<MetricInspectorProps> = ({ cell, onClose }) => {
             Session Metrics
           </h3>
           <div style={{ fontSize: '12px', color: '#8b8f98' }}>
-            {timestamp.toLocaleString()} • Engine: {cell.engine_type}
+            {timestamp.toLocaleString()} • {modelLabel}
           </div>
         </div>
 
@@ -1450,9 +1461,10 @@ interface NewsItemProps {
   llmStatus: LLMStatus | null;
   settings: Settings;
   index: number;
+  onPageChange: (delta: number) => void;
 }
 
-const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, settings, index }) => {
+const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, settings, index, onPageChange }) => {
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -1622,6 +1634,10 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerLeave}
+        onButtonDown={(evt: GamepadEvent) => {
+          if (evt.detail.button === GamepadButton.TRIGGER_LEFT) onPageChange(-1);
+          else if (evt.detail.button === GamepadButton.TRIGGER_RIGHT) onPageChange(1);
+        }}
       >
         <ArticleCard
           article={article}
@@ -1901,6 +1917,8 @@ function Settings({ onBack }: { onBack?: () => void }) {
             rgOptions={[
               { data: "qwen2.5-0.5b", label: "Qwen2.5-0.5B (Default, 352MB)" },
               { data: "mobilellm-600m", label: "MobileLLM-600M ⚠ Experimental (430MB)" },
+              { data: "llama3.2-1b", label: "Llama 3.2-1B (700MB)" },
+              { data: "qwen3-0.6b", label: "Qwen3-0.6B (400MB)" },
             ]}
             selectedOption={settings?.selectedModel ?? "qwen2.5-0.5b"}
             onChange={async (option: SingleDropdownOption) => {
@@ -2403,6 +2421,13 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
   const [settings, setSettings] = useState<Settings | null>(null);
   const [backdropImage] = useState<string | null>(null);
 
+  const pageRef = useRef(page);
+  const totalPagesRef = useRef(totalPages);
+  const loadingRef = useRef(loading);
+  pageRef.current = page;
+  totalPagesRef.current = totalPages;
+  loadingRef.current = loading;
+
   const loadNews = async (pageNum: number, withTransition: boolean = false) => {
     // Fade out if transition requested
     if (withTransition && articles.length > 0) {
@@ -2435,6 +2460,9 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
     }
   };
 
+  const loadNewsRef = useRef(loadNews);
+  loadNewsRef.current = loadNews;
+
   // Load settings
   useEffect(() => {
     getSettings().then(s => setSettings(s));
@@ -2446,6 +2474,27 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
       loadNews(1);
     }
   }, [showSettings]);
+
+  useEffect(() => {
+    const input = (window as any).SteamClient?.Input;
+    if (typeof input?.RegisterForControllerStateChanges !== 'function') return;
+    let prevButtons = 0;
+    const reg = input.RegisterForControllerStateChanges(
+      (changes: Array<{ ulButtons: number }>) => {
+        for (const change of changes) {
+          const curr = change.ulButtons;
+          const pressed = curr & ~prevButtons;
+          prevButtons = curr;
+          if ((pressed & 2) && pageRef.current > 1 && !loadingRef.current) {
+            loadNewsRef.current(pageRef.current - 1, true);
+          } else if ((pressed & 1) && pageRef.current < totalPagesRef.current && !loadingRef.current) {
+            loadNewsRef.current(pageRef.current + 1, true);
+          }
+        }
+      }
+    );
+    return () => reg?.unregister();
+  }, []);
 
   // If showing settings, render Settings component
   if (showSettings && onBackToNews) {
@@ -2529,7 +2578,7 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
   const showPullIndicator = pullDistance > 10 && !refreshing;
 
   return (
-    <div
+    <Focusable
       style={{ position: "relative" }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
@@ -2674,6 +2723,10 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
                   selectedModel: "qwen2.5-0.5b",
                 }}
                 index={idx}
+                onPageChange={(delta) => {
+                  if (delta < 0 && page > 1 && !loading) loadNews(page - 1, true);
+                  else if (delta > 0 && page < totalPages && !loading) loadNews(page + 1, true);
+                }}
               />
             ))
           )}
@@ -2786,7 +2839,7 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
           to { transform: rotate(360deg); }
         }
       `}</style>
-    </div>
+    </Focusable>
   );
 }
 
