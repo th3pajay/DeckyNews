@@ -17,45 +17,17 @@ import {
   definePlugin,
   toaster
 } from "@decky/api";
-import { useState, useEffect, useRef, FC, Component } from "react";
+import { useState, useEffect, useRef, useCallback, memo, FC, Component } from "react";
 import { FaExclamationTriangle, FaCog, FaSync, FaSpinner, FaChevronLeft, FaChevronRight, FaTrash, FaDownload } from "react-icons/fa";
 
-// Add shimmer animation CSS
-const shimmerStyle = document.createElement('style');
-shimmerStyle.innerHTML = `
-  @keyframes shimmer {
-    0% {
-      opacity: 0.6;
-    }
-    50% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0.6;
-    }
-  }
+const _animStyle = document.createElement('style');
+_animStyle.innerHTML = `
+  @keyframes shimmer { 0%,100% { opacity:0.6; } 50% { opacity:1; } }
+  @keyframes blink { 0%,50% { opacity:1; } 51%,100% { opacity:0; } }
+  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+  @keyframes barWave { 0%,100% { opacity:0.15; } 50% { opacity:1; } }
 `;
-document.head.appendChild(shimmerStyle);
-
-// Add blink animation CSS for typewriter cursor
-const blinkStyle = document.createElement('style');
-blinkStyle.innerHTML = `
-  @keyframes blink {
-    0%, 50% { opacity: 1; }
-    51%, 100% { opacity: 0; }
-  }
-`;
-document.head.appendChild(blinkStyle);
-
-// Add spin animation CSS for loading spinners
-const spinStyle = document.createElement('style');
-spinStyle.innerHTML = `
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-`;
-document.head.appendChild(spinStyle);
+document.head.appendChild(_animStyle);
 
 const getNews = callable<[page: number, items_per_page: number], NewsFeedResponse>("get_news");
 const refreshNews = callable<[], boolean>("refresh_news");
@@ -1464,10 +1436,11 @@ interface NewsItemProps {
   onPageChange: (delta: number) => void;
 }
 
-const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, settings, index, onPageChange }) => {
+const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmStatus, settings, index, onPageChange }) => {
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [wavePhase, setWavePhase] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [accentColor, setAccentColor] = useState<string>("#1a9fff");
   const [longPressTimer, setLongPressTimer] = useState<NodeJS.Timeout | null>(null);
@@ -1482,6 +1455,12 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
       }
     };
   }, [longPressTimer]);
+
+  useEffect(() => {
+    if (!summarizing) return;
+    const id = setInterval(() => setWavePhase(p => (p + 1) % 30), 50);
+    return () => clearInterval(id);
+  }, [summarizing]);
 
   const handleClick = () => {
     // Prevent normal click if long-pressing
@@ -1604,6 +1583,11 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
 
   const shouldShowButton = llmEnabled && llmStatus?.model_downloaded;
 
+  const handleButtonDown = useCallback((evt: GamepadEvent) => {
+    if (evt.detail.button === GamepadButton.TRIGGER_LEFT) onPageChange(-1);
+    else if (evt.detail.button === GamepadButton.TRIGGER_RIGHT) onPageChange(1);
+  }, [onPageChange]);
+
   // Extract accent color from static logo
   useEffect(() => {
     if (settings.accentColorSource === "automatic" && article.image_url) {
@@ -1634,10 +1618,7 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerLeave}
-        onButtonDown={(evt: GamepadEvent) => {
-          if (evt.detail.button === GamepadButton.TRIGGER_LEFT) onPageChange(-1);
-          else if (evt.detail.button === GamepadButton.TRIGGER_RIGHT) onPageChange(1);
-        }}
+        onButtonDown={handleButtonDown}
       >
         <ArticleCard
           article={article}
@@ -1673,7 +1654,25 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
                   }}
                 >
                   {summarizing ? (
-                    <span><FaSpinner style={{ animation: "spin 1s linear infinite" }} /> Summarizing...</span>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+                      {([
+                        { height: 8, offset: 0 },
+                        { height: 14, offset: 10 },
+                        { height: 6, offset: 20 }
+                      ]).map(({ height, offset }, i) => {
+                        const t = ((wavePhase + offset) % 30) / 30;
+                        const opacity = 0.15 + 0.85 * Math.sin(t * Math.PI);
+                        return (
+                          <span key={i} style={{
+                            width: 3, height, borderRadius: 2,
+                            background: "currentColor",
+                            display: "inline-block",
+                            opacity
+                          }} />
+                        );
+                      })}
+                      <span style={{ marginLeft: 5 }}>Summarizing</span>
+                    </span>
                   ) : summary ? (
                     expanded ? "Hide Summary" : "Show Summary"
                   ) : (
@@ -1710,7 +1709,7 @@ const NewsItem: FC<NewsItemProps> = ({ article, health, llmEnabled, llmStatus, s
       )}
     </PanelSectionRow>
   );
-};
+});
 
 function Settings({ onBack }: { onBack?: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -2406,6 +2405,36 @@ function Settings({ onBack }: { onBack?: () => void }) {
   );
 }
 
+const DEFAULT_SETTINGS: Settings = {
+  refreshInterval: 30,
+  debugMode: false,
+  sourcesEnabled: [],
+  analyticsOptIn: false,
+  llmEnabled: false,
+  llmCooldownSeconds: 20,
+  llmResourceMonitoringEnabled: true,
+  uiViewMode: "comfortable",
+  showSourceIcons: true,
+  glassmorphismOpacity: 30,
+  accentColorSource: "automatic",
+  dynamicBackdropEnabled: true,
+  aiTypewriterEnabled: true,
+  aiTypewriterSpeed: 30,
+  enableHoverPreview: true,
+  hoverPreviewDelay: 500,
+  aiPersonality: "analyst",
+  performanceGuardEnabled: true,
+  ramThresholdMB: 800,
+  articleRetention: 500,
+  allowLlmDuringGaming: false,
+  llmTempCeilingCelsius: 75,
+  llmThermalCooldownBonus: 30,
+  llmAdaptiveTokens: true,
+  llmReducedTokenCount: 80,
+  llmAdaptiveThreads: true,
+  selectedModel: "qwen2.5-0.5b",
+};
+
 function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBackToNews?: () => void }) {
   const [articles, setArticles] = useState<NewsArticle[]>([]);
   const [page, setPage] = useState(1);
@@ -2462,6 +2491,19 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
 
   const loadNewsRef = useRef(loadNews);
   loadNewsRef.current = loadNews;
+
+  const handlePageChange = useCallback((delta: number) => {
+    if (delta < 0 && pageRef.current > 1 && !loadingRef.current) loadNewsRef.current(pageRef.current - 1, true);
+    else if (delta > 0 && pageRef.current < totalPagesRef.current && !loadingRef.current) loadNewsRef.current(pageRef.current + 1, true);
+  }, []);
+
+  const handlePrevPage = useCallback(() => {
+    if (pageRef.current > 1 && !loadingRef.current) loadNewsRef.current(pageRef.current - 1, true);
+  }, []);
+
+  const handleNextPage = useCallback(() => {
+    if (pageRef.current < totalPagesRef.current && !loadingRef.current) loadNewsRef.current(pageRef.current + 1, true);
+  }, []);
 
   // Load settings
   useEffect(() => {
@@ -2688,45 +2730,14 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
           ) : (
             articles.map((article, idx) => (
               <NewsItem
-                key={`${article.source}-${idx}`}
+                key={article.link}
                 article={article}
                 health={sourceHealth[article.source] || 'ok'}
                 llmEnabled={llmStatus?.enabled ?? false}
                 llmStatus={llmStatus}
-                settings={settings || {
-                  refreshInterval: 30,
-                  debugMode: false,
-                  sourcesEnabled: [],
-                  analyticsOptIn: false,
-                  llmEnabled: false,
-                  llmCooldownSeconds: 20,
-                  llmResourceMonitoringEnabled: true,
-                  uiViewMode: "comfortable",
-                  showSourceIcons: true,
-                  glassmorphismOpacity: 30,
-                  accentColorSource: "automatic",
-                  dynamicBackdropEnabled: true,
-                  aiTypewriterEnabled: true,
-                  aiTypewriterSpeed: 30,
-                  enableHoverPreview: true,
-                  hoverPreviewDelay: 500,
-                  aiPersonality: "analyst",
-                  performanceGuardEnabled: true,
-                  ramThresholdMB: 800,
-                  articleRetention: 500,
-                  allowLlmDuringGaming: false,
-                  llmTempCeilingCelsius: 75,
-                  llmThermalCooldownBonus: 30,
-                  llmAdaptiveTokens: true,
-                  llmReducedTokenCount: 80,
-                  llmAdaptiveThreads: true,
-                  selectedModel: "qwen2.5-0.5b",
-                }}
+                settings={settings ?? DEFAULT_SETTINGS}
                 index={idx}
-                onPageChange={(delta) => {
-                  if (delta < 0 && page > 1 && !loading) loadNews(page - 1, true);
-                  else if (delta > 0 && page < totalPages && !loading) loadNews(page + 1, true);
-                }}
+                onPageChange={handlePageChange}
               />
             ))
           )}
@@ -2754,8 +2765,8 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
                 }}
               >
                 <Focusable
-                  onActivate={() => page > 1 && !loading && loadNews(page - 1, true)}
-                  onClick={() => page > 1 && !loading && loadNews(page - 1, true)}
+                  onActivate={handlePrevPage}
+                  onClick={handlePrevPage}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -2785,8 +2796,8 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
                   {page} / {totalPages}
                 </div>
                 <Focusable
-                  onActivate={() => page < totalPages && !loading && loadNews(page + 1, true)}
-                  onClick={() => page < totalPages && !loading && loadNews(page + 1, true)}
+                  onActivate={handleNextPage}
+                  onClick={handleNextPage}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -2833,12 +2844,6 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
         </PanelSection>
       )}
 
-      <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </Focusable>
   );
 }
@@ -2892,6 +2897,11 @@ const ColoredNewsIcon: FC = () => {
   );
 };
 
+const handleRefresh = async () => {
+  await refreshNews();
+  toaster.toast({ title: "Refreshing", body: "Fetching latest news..." });
+};
+
 export default definePlugin(() => {
   console.log("DeckyNews initializing");
 
@@ -2925,20 +2935,8 @@ export default definePlugin(() => {
               transition: "all 0.2s ease",
               cursor: "pointer",
             }}
-            onActivate={async () => {
-              await refreshNews();
-              toaster.toast({
-                title: "Refreshing",
-                body: "Fetching latest news..."
-              });
-            }}
-            onClick={async () => {
-              await refreshNews();
-              toaster.toast({
-                title: "Refreshing",
-                body: "Fetching latest news..."
-              });
-            }}
+            onActivate={handleRefresh}
+            onClick={handleRefresh}
           >
             <FaSync style={{ fontSize: "14px" }} />
           </Focusable>

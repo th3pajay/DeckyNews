@@ -4,6 +4,7 @@ Groups similar articles to reduce UI clutter.
 """
 
 import hashlib
+from collections import defaultdict
 from typing import List, Dict, Optional
 from Levenshtein import distance as levenshtein_distance
 
@@ -70,101 +71,56 @@ class ArticleDeduplicator:
         return hashlib.md5(text.encode()).hexdigest()[:8]
 
     def find_duplicates(self, articles: List[Dict]) -> List[List[Dict]]:
-        """
-        Group articles by title similarity.
+        buckets: Dict[str, List[Dict]] = defaultdict(list)
+        for article in articles:
+            h = article.get('similarity_hash') or self.calculate_similarity_hash(article['title'])
+            buckets[h].append(article)
 
-        Uses O(n²) comparison with Levenshtein distance.
-        For large datasets (>1000 articles), consider limiting
-        to most recent N articles.
-
-        Args:
-            articles: List of article dicts with 'title' key
-
-        Returns:
-            List of duplicate groups. Each group is a list of articles.
-            Only returns groups with 2+ articles.
-
-        Example:
-            [
-                [article1, article2, article3],  # Group 1: similar titles
-                [article4, article5]             # Group 2: similar titles
-            ]
-        """
         groups = []
-        processed = set()
-
-        for i, article in enumerate(articles):
-            if i in processed:
+        for bucket in buckets.values():
+            if len(bucket) < 2:
                 continue
-
-            # Start new group with current article
-            group = [article]
-            processed.add(i)
-
-            # Compare with remaining articles
-            for j, other in enumerate(articles[i+1:], start=i+1):
-                if j in processed:
+            processed: set = set()
+            for i, article in enumerate(bucket):
+                if i in processed:
                     continue
-
-                # Calculate edit distance
-                dist = levenshtein_distance(
-                    article['title'].lower(),
-                    other['title'].lower()
-                )
-
-                if dist <= self.threshold:
-                    group.append(other)
-                    processed.add(j)
-
-            # Only add groups with duplicates
-            if len(group) > 1:
-                groups.append(group)
+                group = [article]
+                processed.add(i)
+                for j, other in enumerate(bucket[i + 1:], start=i + 1):
+                    if j in processed:
+                        continue
+                    dist = levenshtein_distance(
+                        article['title'].lower(),
+                        other['title'].lower(),
+                    )
+                    if dist <= self.threshold:
+                        group.append(other)
+                        processed.add(j)
+                if len(group) > 1:
+                    groups.append(group)
 
         return groups
 
     def mark_duplicates_in_db(self, db_manager, groups: List[List[Dict]]):
-        """
-        Update articles table with similarity_hash for grouped articles.
+        hash_updates = []
+        coverage_updates = []
 
-        The "master" article (first in group, typically earliest published)
-        gets the similarity_hash. Other articles in the group get the same hash,
-        allowing the frontend to group them under "See X similar stories".
-
-        Also populates coverage stats for sparkline visualization.
-
-        Args:
-            db_manager: DatabaseManager instance
-            groups: List of duplicate groups from find_duplicates()
-        """
         for group in groups:
             if not group:
                 continue
 
-            # Sort by published date (earliest first)
-            sorted_group = sorted(
-                group,
-                key=lambda x: x.get('published', '')
-            )
+            sorted_group = sorted(group, key=lambda x: x.get('published', ''))
+            similarity_hash = self.calculate_similarity_hash(sorted_group[0]['title'])
 
-            # Master article: first (earliest)
-            master = sorted_group[0]
-
-            # Generate hash for this group
-            similarity_hash = self.calculate_similarity_hash(master['title'])
-
-            # Update all articles in group with same hash and coverage stats
             for article in sorted_group:
-                db_manager.update_similarity_hash(
-                    article['id'],
-                    similarity_hash
-                )
-
-                # Update coverage stats for sparkline data
+                hash_updates.append((similarity_hash, article['id']))
                 if article.get('published'):
-                    db_manager.update_coverage_stats(
-                        similarity_hash,
-                        article['published']
-                    )
+                    coverage_updates.append((similarity_hash, article['published']))
+
+        if hash_updates:
+            db_manager.batch_update_similarity_hashes(hash_updates)
+        if coverage_updates:
+            db_manager.batch_update_coverage_stats(coverage_updates)
 
     def get_duplicate_stats(self, articles: List[Dict]) -> Dict[str, int]:
         """

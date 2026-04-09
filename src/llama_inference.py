@@ -1,6 +1,7 @@
 """LLM inference using llamafile/llama.cpp subprocess."""
 
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -9,6 +10,11 @@ from typing import Optional
 
 class LlamaCppSubprocess:
     """Run llama.cpp via subprocess using llamafile or llama-cli binary."""
+
+    _RE_TPS = re.compile(r'eval time.*?(\d+\.\d+)\s+tokens per second')
+    _RE_PROMPT_EVAL = re.compile(r'prompt eval time\s+=\s+(\d+\.\d+)\s+ms')
+    _RE_TOTAL_TOKENS = re.compile(r'total time.*?/\s+(\d+)\s+tokens')
+    _RE_LOAD = re.compile(r'load time\s+=\s+(\d+\.\d+)\s+ms')
 
     def __init__(self, binary_path: Optional[str] = None, model_path: Optional[str] = None):
         self.binary_path = binary_path or self._find_binary()
@@ -84,11 +90,11 @@ class LlamaCppSubprocess:
                 system_prompt = "You are a gaming news summarizer. Summarize in 2-3 sentences."
 
             if prompt_format == "llama3":
-                prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\nSummarize this article:\n\n{text[:2500]}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+                prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\nSummarize this article:\n\n{text}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
             elif prompt_format == "chatml_nothink":
-                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text[:2500]}\n/no_think<|im_end|>\n<|im_start|>assistant\n"
+                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text}\n/no_think<|im_end|>\n<|im_start|>assistant\n"
             else:
-                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text[:2500]}<|im_end|>\n<|im_start|>assistant\n"
+                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text}<|im_end|>\n<|im_start|>assistant\n"
 
         cmd = [
             self.binary_path,
@@ -135,7 +141,6 @@ class LlamaCppSubprocess:
             raise TimeoutError("Summarization timed out")
 
         if proc.returncode == 0:
-            import re
             output = stdout.strip()
             if "<|im_end|>" in output:
                 output = output.split("<|im_end|>")[0].strip()
@@ -158,9 +163,6 @@ class LlamaCppSubprocess:
             raise RuntimeError(f"llama.cpp failed: {stderr}")
 
     def _parse_timing_metrics(self, stderr: str) -> dict:
-        """Parse llamafile timing lines from stderr into a metrics dict."""
-        import re
-
         metrics = {
             'tps': None,
             'ttft': None,
@@ -169,21 +171,21 @@ class LlamaCppSubprocess:
             'load_duration': None,
         }
 
-        tps_match = re.search(r'eval time.*?(\d+\.\d+)\s+tokens per second', stderr)
-        if tps_match:
-            metrics['tps'] = float(tps_match.group(1))
+        m = self._RE_TPS.search(stderr)
+        if m:
+            metrics['tps'] = float(m.group(1))
 
-        prompt_eval_match = re.search(r'prompt eval time\s+=\s+(\d+\.\d+)\s+ms', stderr)
-        if prompt_eval_match:
-            metrics['prompt_eval_time'] = float(prompt_eval_match.group(1))
-            metrics['ttft'] = float(prompt_eval_match.group(1))
+        m = self._RE_PROMPT_EVAL.search(stderr)
+        if m:
+            metrics['prompt_eval_time'] = float(m.group(1))
+            metrics['ttft'] = float(m.group(1))
 
-        total_tokens_match = re.search(r'total time.*?/\s+(\d+)\s+tokens', stderr)
-        if total_tokens_match:
-            metrics['total_tokens'] = int(total_tokens_match.group(1))
+        m = self._RE_TOTAL_TOKENS.search(stderr)
+        if m:
+            metrics['total_tokens'] = int(m.group(1))
 
-        load_match = re.search(r'load time\s+=\s+(\d+\.\d+)\s+ms', stderr)
-        if load_match:
-            metrics['load_duration'] = float(load_match.group(1)) / 1000.0
+        m = self._RE_LOAD.search(stderr)
+        if m:
+            metrics['load_duration'] = float(m.group(1)) / 1000.0
 
         return metrics

@@ -125,10 +125,10 @@ def get_static_logo_url(source: str) -> str:
     logo_filename = source.lower().replace(' ', '') + '.png'
     return f"/defaults/logos/{logo_filename}"
 
-def get_favicon_url(article_link: str) -> str:
-    """Return Google Favicon API URL for article domain."""
-    domain = urlparse(article_link).netloc
-    return f"https://www.google.com/s2/favicons?domain={domain}&sz=32"
+def get_favicon_url(source_id: str) -> Optional[str]:
+    url = NEWS_SOURCES.get(source_id, "")
+    domain = urlparse(url).netloc if url else ""
+    return f"https://www.google.com/s2/favicons?domain={domain}&sz=32" if domain else None
 
 # Global inference settings not specific to any model
 LLM_GLOBAL = {
@@ -1362,11 +1362,34 @@ class NewsFetcher:
                 return None
 
         url = NEWS_SOURCES[source_id]
+        favicon_url = get_favicon_url(source_id)
 
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            conditional_headers = {}
+            stored_etag = self.db.get_metadata(f'etag_{source_id}')
+            stored_lastmod = self.db.get_metadata(f'lastmod_{source_id}')
+            if stored_etag:
+                conditional_headers['If-None-Match'] = stored_etag
+            if stored_lastmod:
+                conditional_headers['If-Modified-Since'] = stored_lastmod
+
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=conditional_headers) as response:
+                if response.status == 304:
+                    self.source_health[source_id] = 'ok'
+                    self.failure_counts[source_id] = 0
+                    self.last_fetch_times[source_id] = datetime.now()
+                    decky.logger.info(f"{source_id}: feed unchanged (304)")
+                    return None
+
                 if response.status != 200:
                     raise Exception(f"HTTP {response.status}")
+
+                new_etag = response.headers.get('ETag')
+                new_lastmod = response.headers.get('Last-Modified')
+                if new_etag:
+                    self.db.set_metadata(f'etag_{source_id}', new_etag)
+                if new_lastmod:
+                    self.db.set_metadata(f'lastmod_{source_id}', new_lastmod)
 
                 max_bytes = 5_242_880
                 buf = bytearray()
@@ -1392,15 +1415,14 @@ class NewsFetcher:
                     else:
                         pub_datetime = datetime.now()
 
-                    article_link = entry.get('link', '')
                     articles.append({
                         'title': entry.get('title', 'No title'),
-                        'link': article_link,
+                        'link': entry.get('link', ''),
                         'published': pub_datetime.isoformat() + 'Z',
                         'source': source_id,
                         'content': entry.get('summary', ''),
                         'image_url': get_static_logo_url(source_id),
-                        'favicon_url': get_favicon_url(article_link) if article_link else None
+                        'favicon_url': favicon_url,
                     })
 
                 # Insert articles into database
@@ -1432,7 +1454,7 @@ class NewsFetcher:
 
     async def fetch_all_sources(self, enabled_sources: List[str]) -> int:
         ssl_context = ssl.create_default_context(cafile=certifi.where())
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        connector = aiohttp.TCPConnector(ssl=ssl_context, limit=30, limit_per_host=3, ttl_dns_cache=300)
 
         headers = {
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
