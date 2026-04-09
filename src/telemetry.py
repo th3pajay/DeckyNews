@@ -64,6 +64,7 @@ class TelemetryDB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER DEFAULT (strftime('%s', 'now')),
                 engine_type TEXT,
+                model_id TEXT,
 
                 /* I. AI Performance (9 columns) */
                 tps REAL,
@@ -121,6 +122,12 @@ class TelemetryDB:
         except sqlite3.OperationalError:
             pass
 
+        try:
+            conn.execute("ALTER TABLE session_metrics ADD COLUMN model_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
         conn.execute("INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_version', '1')")
         conn.execute("INSERT OR IGNORE INTO metadata (key, value) VALUES ('created_at', strftime('%s', 'now'))")
 
@@ -171,7 +178,7 @@ class TelemetryDB:
     # "table session_metrics has no column named X" errors from intermediate
     # fields (e.g. inference_duration) leaking into the insert payload.
     VALID_COLUMNS = frozenset({
-        'timestamp', 'engine_type',
+        'timestamp', 'engine_type', 'model_id',
         # I. AI Performance
         'tps', 'ttft', 'prompt_eval_time', 'total_tokens', 'stop_reason',
         'ram_delta_mb', 'load_duration',
@@ -389,7 +396,7 @@ class TelemetryManager:
         self._baseline_cpu_temp = 0.0
         self._baseline_ram_mb = 0.0
 
-    def start_session(self, article_id: str) -> Optional[str]:
+    def start_session(self, article_id: str, model_id: str = "unknown") -> Optional[str]:
         """
         Initialize telemetry session for an article.
 
@@ -409,7 +416,8 @@ class TelemetryManager:
         # Initialize session buffer (article_id only used for session_id, not stored in DB)
         self._session_buffer[session_id] = {
             'timestamp': int(time.time()),
-            'engine_type': 'llamafile',  # Hardcoded for now
+            'engine_type': 'llamafile',
+            'model_id': model_id,
         }
 
         # Capture hardware baseline

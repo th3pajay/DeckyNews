@@ -43,7 +43,6 @@ class DatabaseManager:
         self._init_database()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get or create a thread-local database connection."""
         if not hasattr(self._local, 'conn'):
             self._local.conn = sqlite3.connect(
                 str(self.db_path),
@@ -56,12 +55,19 @@ class DatabaseManager:
                 result = self._local.conn.execute("PRAGMA journal_mode=WAL")
                 mode = result.fetchone()[0]
                 if mode.upper() != "WAL":
-                    # WAL not supported, log warning
-                    pass  # Silent fallback to DELETE mode
+                    pass
             except Exception:
-                pass  # Silent fallback to DELETE mode
+                pass
 
             self._local.conn.execute("PRAGMA synchronous=NORMAL")
+
+            def _regexp(pattern: str, text: str) -> bool:
+                try:
+                    return re.search(pattern, text, re.IGNORECASE) is not None
+                except re.error:
+                    return False
+
+            self._local.conn.create_function("REGEXP", 2, _regexp)
 
         return self._local.conn
 
@@ -226,37 +232,33 @@ class DatabaseManager:
         return self._queue_write(self._insert_articles_impl, articles)
 
     def _insert_articles_impl(self, articles: List[Dict]) -> Dict[str, int]:
-        """Internal implementation of insert_articles."""
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        inserted = 0
-        duplicates = 0
+        rows = [
+            (
+                a['title'],
+                a['link'],
+                a['published'],
+                a['source'],
+                a.get('content', ''),
+                a.get('image_url'),
+                a.get('favicon_url'),
+            )
+            for a in articles
+        ]
 
-        for article in articles:
-            try:
-                cursor.execute("""
-                    INSERT INTO articles (title, link, published, source, content, image_url, favicon_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    article['title'],
-                    article['link'],
-                    article['published'],
-                    article['source'],
-                    article.get('content', ''),
-                    article.get('image_url'),
-                    article.get('favicon_url')
-                ))
-                inserted += 1
-            except sqlite3.IntegrityError:
-                # Duplicate link (UNIQUE constraint)
-                duplicates += 1
+        cursor.executemany("""
+            INSERT OR IGNORE INTO articles (title, link, published, source, content, image_url, favicon_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, rows)
 
+        inserted = cursor.rowcount
         conn.commit()
 
         return {
             'inserted': inserted,
-            'duplicates': duplicates
+            'duplicates': len(articles) - inserted,
         }
 
     def get_articles(
@@ -279,42 +281,40 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # Build query with optional source filtering
         where_clause = ""
-        params = []
+        params: List[Any] = []
 
         if sources:
             placeholders = ','.join('?' * len(sources))
             where_clause = f"WHERE source IN ({placeholders})"
             params.extend(sources)
 
-        # Get total count
-        count_query = f"SELECT COUNT(*) FROM articles {where_clause}"
-        cursor.execute(count_query, params)
-        total_articles = cursor.fetchone()[0]
-
-        # Calculate pagination
-        total_pages = (total_articles + items_per_page - 1) // items_per_page
         offset = (page - 1) * items_per_page
-
-        # Get paginated results
         query = f"""
-            SELECT id, title, link, published, source, similarity_hash, image_url, favicon_url, content
+            SELECT id, title, link, published, source, similarity_hash, image_url, favicon_url, content,
+                   COUNT(*) OVER() AS total_count
             FROM articles
             {where_clause}
             ORDER BY published DESC
             LIMIT ? OFFSET ?
         """
-        params.extend([items_per_page, offset])
+        cursor.execute(query, params + [items_per_page, offset])
+        rows = cursor.fetchall()
 
-        cursor.execute(query, params)
-        articles = [dict(row) for row in cursor.fetchall()]
+        if rows:
+            total_articles = rows[0]['total_count']
+            articles = [{k: v for k, v in dict(r).items() if k != 'total_count'} for r in rows]
+        else:
+            total_articles = 0
+            articles = []
+
+        total_pages = (total_articles + items_per_page - 1) // items_per_page
 
         return {
             'articles': articles,
             'total_articles': total_articles,
             'total_pages': total_pages,
-            'current_page': page
+            'current_page': page,
         }
 
     def search_articles(
@@ -335,16 +335,6 @@ class DatabaseManager:
             List of matching article dicts
         """
         conn = self._get_connection()
-
-        # Register Python regex function
-        def regexp(pattern: str, text: str) -> bool:
-            try:
-                return re.search(pattern, text, re.IGNORECASE) is not None
-            except re.error:
-                return False
-
-        conn.create_function("REGEXP", 2, regexp)
-
         cursor = conn.cursor()
 
         # Build query
@@ -496,6 +486,50 @@ class DatabaseManager:
             DO UPDATE SET article_count = article_count + 1
         """, (similarity_hash, hour_bucket))
 
+        conn.commit()
+
+    def batch_update_similarity_hashes(self, updates: List[tuple]) -> None:
+        return self._queue_write(self._batch_update_similarity_hashes_impl, updates)
+
+    def _batch_update_similarity_hashes_impl(self, updates: List[tuple]) -> None:
+        conn = self._get_connection()
+        conn.cursor().executemany(
+            "UPDATE articles SET similarity_hash = ? WHERE id = ?",
+            updates,
+        )
+        conn.commit()
+
+    def batch_update_coverage_stats(self, updates: List[tuple]) -> None:
+        return self._queue_write(self._batch_update_coverage_stats_impl, updates)
+
+    def _batch_update_coverage_stats_impl(self, updates: List[tuple]) -> None:
+        from collections import Counter
+        counts: Counter = Counter()
+        for similarity_hash, published_time in updates:
+            dt = datetime.fromisoformat(published_time.replace('Z', '+00:00'))
+            bucket = dt.replace(minute=0, second=0, microsecond=0).isoformat()
+            counts[(similarity_hash, bucket)] += 1
+
+        conn = self._get_connection()
+        conn.cursor().executemany("""
+            INSERT INTO article_coverage (similarity_hash, hour_bucket, article_count)
+            VALUES (?, ?, ?)
+            ON CONFLICT(similarity_hash, hour_bucket)
+            DO UPDATE SET article_count = article_count + excluded.article_count
+        """, [(h, b, c) for (h, b), c in counts.items()])
+        conn.commit()
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        conn = self._get_connection()
+        row = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        return self._queue_write(self._set_metadata_impl, key, value)
+
+    def _set_metadata_impl(self, key: str, value: str) -> None:
+        conn = self._get_connection()
+        conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
 
     def get_coverage_sparkline(self, similarity_hash: str) -> Dict[str, Any]:

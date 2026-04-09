@@ -1,6 +1,7 @@
 """LLM inference using llamafile/llama.cpp subprocess."""
 
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -9,6 +10,11 @@ from typing import Optional
 
 class LlamaCppSubprocess:
     """Run llama.cpp via subprocess using llamafile or llama-cli binary."""
+
+    _RE_TPS = re.compile(r'eval time.*?(\d+\.\d+)\s+tokens per second')
+    _RE_PROMPT_EVAL = re.compile(r'prompt eval time\s+=\s+(\d+\.\d+)\s+ms')
+    _RE_TOTAL_TOKENS = re.compile(r'total time.*?/\s+(\d+)\s+tokens')
+    _RE_LOAD = re.compile(r'load time\s+=\s+(\d+\.\d+)\s+ms')
 
     def __init__(self, binary_path: Optional[str] = None, model_path: Optional[str] = None):
         self.binary_path = binary_path or self._find_binary()
@@ -53,7 +59,7 @@ class LlamaCppSubprocess:
 
         return None
 
-    def summarize(self, text: str, max_tokens: int = 150, system_prompt: str = None, n_threads: int = 2, prompt_override: Optional[str] = None, n_ctx: int = 1024) -> dict:
+    def summarize(self, text: str, max_tokens: int = 150, system_prompt: str = None, n_threads: int = 2, prompt_override: Optional[str] = None, n_ctx: int = 1024, prompt_format: str = "chatml") -> dict:
         """
         Summarize text using llama.cpp.
 
@@ -78,32 +84,30 @@ class LlamaCppSubprocess:
             raise ValueError("Model path not set")
 
         if prompt_override is not None:
-            # Use caller-supplied raw prompt (e.g. completion format for base models)
             prompt = prompt_override
         else:
-            # Build ChatML format for instruction-tuned models
             if system_prompt is None:
                 system_prompt = "You are a gaming news summarizer. Summarize in 2-3 sentences."
 
-            prompt = f"""<|im_start|>system
-{system_prompt}<|im_end|>
-<|im_start|>user
-Summarize this article:
-
-{text[:2500]}<|im_end|>
-<|im_start|>assistant
-"""
+            if prompt_format == "llama3":
+                prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\nSummarize this article:\n\n{text}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
+            elif prompt_format == "chatml_nothink":
+                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text}\n/no_think<|im_end|>\n<|im_start|>assistant\n"
+            else:
+                prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nSummarize this article:\n\n{text}<|im_end|>\n<|im_start|>assistant\n"
 
         cmd = [
             self.binary_path,
             "-m", self.model_path,
             "-p", prompt,
             "-n", str(max_tokens),
-            "--temp", "0.0",
+            "--temp", "0.2",
+            "--min-p", "0.05",
             "-ngl", "0",
             "-t", str(n_threads),
             "-c", str(n_ctx),
-            "--repeat-penalty", "1.15",
+            "--repeat-penalty", "1.3",
+            "--repeat-last-n", str(max_tokens),
             "--no-display-prompt",
         ]
 
@@ -140,20 +144,25 @@ Summarize this article:
             output = stdout.strip()
             if "<|im_end|>" in output:
                 output = output.split("<|im_end|>")[0].strip()
+            if "<|eot_id|>" in output:
+                output = output.split("<|eot_id|>")[0].strip()
+
+            output = re.sub(r'<think>.*?</think>', '', output, flags=re.DOTALL).strip()
+
+            for prefix in ("Here is the summary of the article:", "Here is a summary of the article:", "Here is a summary:", "Summary:"):
+                if output.lower().startswith(prefix.lower()):
+                    output = output[len(prefix):].strip()
+                    break
 
             metrics = self._parse_timing_metrics(stderr)
             metrics['summary'] = output
-            # For ChatML the stop token is <|im_end|>; for completion it's end-of-generation
-            metrics['stop_reason'] = 'stop' if ('<|im_end|>' in stdout or prompt_override is not None) else 'length'
+            metrics['stop_reason'] = 'stop' if ('<|im_end|>' in stdout or '<|eot_id|>' in stdout or prompt_override is not None) else 'length'
 
             return metrics
         else:
             raise RuntimeError(f"llama.cpp failed: {stderr}")
 
     def _parse_timing_metrics(self, stderr: str) -> dict:
-        """Parse llamafile timing lines from stderr into a metrics dict."""
-        import re
-
         metrics = {
             'tps': None,
             'ttft': None,
@@ -162,21 +171,21 @@ Summarize this article:
             'load_duration': None,
         }
 
-        tps_match = re.search(r'eval time.*?(\d+\.\d+)\s+tokens per second', stderr)
-        if tps_match:
-            metrics['tps'] = float(tps_match.group(1))
+        m = self._RE_TPS.search(stderr)
+        if m:
+            metrics['tps'] = float(m.group(1))
 
-        prompt_eval_match = re.search(r'prompt eval time\s+=\s+(\d+\.\d+)\s+ms', stderr)
-        if prompt_eval_match:
-            metrics['prompt_eval_time'] = float(prompt_eval_match.group(1))
-            metrics['ttft'] = float(prompt_eval_match.group(1))
+        m = self._RE_PROMPT_EVAL.search(stderr)
+        if m:
+            metrics['prompt_eval_time'] = float(m.group(1))
+            metrics['ttft'] = float(m.group(1))
 
-        total_tokens_match = re.search(r'total time.*?/\s+(\d+)\s+tokens', stderr)
-        if total_tokens_match:
-            metrics['total_tokens'] = int(total_tokens_match.group(1))
+        m = self._RE_TOTAL_TOKENS.search(stderr)
+        if m:
+            metrics['total_tokens'] = int(m.group(1))
 
-        load_match = re.search(r'load time\s+=\s+(\d+\.\d+)\s+ms', stderr)
-        if load_match:
-            metrics['load_duration'] = float(load_match.group(1)) / 1000.0
+        m = self._RE_LOAD.search(stderr)
+        if m:
+            metrics['load_duration'] = float(m.group(1)) / 1000.0
 
         return metrics
