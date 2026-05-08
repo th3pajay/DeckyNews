@@ -51,13 +51,7 @@ class DatabaseManager:
             )
             self._local.conn.row_factory = sqlite3.Row
 
-            try:
-                result = self._local.conn.execute("PRAGMA journal_mode=WAL")
-                mode = result.fetchone()[0]
-                if mode.upper() != "WAL":
-                    pass
-            except Exception:
-                pass
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
 
             self._local.conn.execute("PRAGMA synchronous=NORMAL")
 
@@ -72,10 +66,6 @@ class DatabaseManager:
         return self._local.conn
 
     def _write_worker(self):
-        """
-        Background worker thread that processes write operations serially.
-        Prevents "Database is locked" errors during concurrent writes.
-        """
         while self._write_worker_running.is_set():
             try:
                 # Block for up to 1 second waiting for work
@@ -98,8 +88,9 @@ class DatabaseManager:
 
             except queue.Empty:
                 continue
-            except Exception:
-                pass  # Worker continues running
+            except Exception as e:
+                import logging
+                logging.warning(f"[DatabaseManager] Write worker error: {e}")
 
     def _queue_write(self, func: Callable, *args, **kwargs):
         """
@@ -161,6 +152,11 @@ class DatabaseManager:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_similarity_hash
             ON articles(similarity_hash)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_source_published
+            ON articles(source, published DESC)
         """)
 
         # Create metadata table
@@ -248,13 +244,18 @@ class DatabaseManager:
             for a in articles
         ]
 
+        cursor.execute("SELECT COUNT(*) FROM articles")
+        count_before = cursor.fetchone()[0]
+
         cursor.executemany("""
             INSERT OR IGNORE INTO articles (title, link, published, source, content, image_url, favicon_url)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, rows)
 
-        inserted = cursor.rowcount
         conn.commit()
+
+        cursor.execute("SELECT COUNT(*) FROM articles")
+        inserted = cursor.fetchone()[0] - count_before
 
         return {
             'inserted': inserted,

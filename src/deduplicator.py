@@ -39,22 +39,6 @@ class ArticleDeduplicator:
         self.threshold = similarity_threshold
 
     def calculate_similarity_hash(self, title: str) -> str:
-        """
-        Create normalized hash for fast pre-filtering.
-
-        Normalizations applied:
-        - Lowercase conversion
-        - Remove punctuation
-        - Remove common stopwords ("the", "a", "an")
-        - Sort words alphabetically
-        - Hash to 8-character hex string
-
-        Args:
-            title: Article title
-
-        Returns:
-            8-character hex hash string
-        """
         # Normalize: lowercase + remove punctuation
         normalized = title.lower()
         normalized = ''.join(c if c.isalnum() or c.isspace() else ' ' for c in normalized)
@@ -80,6 +64,9 @@ class ArticleDeduplicator:
         for bucket in buckets.values():
             if len(bucket) < 2:
                 continue
+            # Cap per-bucket comparisons to prevent O(n²) blowup on very similar content
+            if len(bucket) > 50:
+                bucket = bucket[:50]
             processed: set = set()
             for i, article in enumerate(bucket):
                 if i in processed:

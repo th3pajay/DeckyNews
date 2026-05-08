@@ -174,16 +174,16 @@ MODEL_CATALOG = {
         "max_gen_tokens": 150,
         "timeout_seconds": 20,
     },
-    "qwen3-0.6b": {
-        "display_name": "Qwen3-0.6B",
-        "description": "Newer Qwen generation. Thinking mode disabled.",
-        "repo": "bartowski/Qwen_Qwen3-0.6B-GGUF",
-        "filename": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
+    "qwen3-0.6b-thinking": {
+        "display_name": "Qwen3-0.6B Thinking",
+        "description": "Qwen3-0.6B with chain-of-thought reasoning enabled.",
+        "repo": "Jackrong/Qwen3-0.6B-Thinking-GGUF",
+        "filename": "qwen3-0.6b.Q4_K_M.gguf",
         "size_mb": 400,
-        "prompt_format": "chatml_nothink",
+        "prompt_format": "chatml",
         "n_ctx": 2048,
-        "max_gen_tokens": 150,
-        "timeout_seconds": 20,
+        "max_gen_tokens": 512,
+        "timeout_seconds": 40,
     },
 }
 
@@ -560,72 +560,25 @@ class SummarizationManager:
         Check status of all LLM dependencies for diagnostics.
         Returns dict with import status, version info, and error messages.
         """
-        deps_status = {}
+        def _check_dep(name, getter, log_level="warning"):
+            try:
+                mod = getter()
+                return {"available": True, "version": getattr(mod, "__version__", "unknown"), "error": None}
+            except ImportError as e:
+                fn = decky.logger.warning if log_level == "warning" else decky.logger.error
+                fn(f"{name} not available: {e}")
+                return {"available": False, "version": None, "error": str(e)}
 
-        # Check psutil (resource monitoring)
-        try:
-            psutil = _get_psutil()
-            deps_status["psutil"] = {
-                "available": True,
-                "version": getattr(psutil, "__version__", "unknown"),
-                "error": None
-            }
-        except ImportError as e:
-            deps_status["psutil"] = {
-                "available": False,
-                "version": None,
-                "error": str(e)
-            }
-            decky.logger.warning(f"psutil not available: {e}")
-
-        # Check cloudscraper (article fetching)
-        try:
-            cloudscraper = _get_cloudscraper()
-            deps_status["cloudscraper"] = {
-                "available": True,
-                "version": getattr(cloudscraper, "__version__", "unknown"),
-                "error": None
-            }
-        except ImportError as e:
-            deps_status["cloudscraper"] = {
-                "available": False,
-                "version": None,
-                "error": str(e)
-            }
-            decky.logger.warning(f"cloudscraper not available: {e}")
-
-        # Check readability-lxml (article extraction)
-        try:
-            readability = _get_readability()
-            deps_status["readability"] = {
-                "available": True,
-                "version": "unknown",
-                "error": None
-            }
-        except ImportError as e:
-            deps_status["readability"] = {
-                "available": False,
-                "version": None,
-                "error": str(e)
-            }
-            decky.logger.error(f"readability-lxml not available: {e}")
-
-
-        # Check llama-cpp-python (not imported lazily, check separately)
-        try:
-            from src.llama_inference import LlamaCppSubprocess
-            deps_status["llama_cpp_python"] = {
-                "available": True,
-                "version": "unknown",
-                "error": None
-            }
-        except ImportError as e:
-            deps_status["llama_cpp_python"] = {
-                "available": False,
-                "version": None,
-                "error": str(e)
-            }
-            decky.logger.error(f"llama_cpp_python not available: {e}")
+        deps_status = {
+            "psutil":          _check_dep("psutil", _get_psutil),
+            "cloudscraper":    _check_dep("cloudscraper", _get_cloudscraper),
+            "readability":     _check_dep("readability", _get_readability, "error"),
+            "llama_cpp_python": _check_dep(
+                "llama_cpp_python",
+                lambda: __import__("src.llama_inference", fromlist=["LlamaCppSubprocess"]),
+                "error"
+            ),
+        }
 
         # Log summary
         available_count = sum(1 for dep in deps_status.values() if dep["available"])
@@ -653,46 +606,61 @@ class SummarizationManager:
         cfg = self._get_active_config()
         return self.model_dir / self.selected_model / cfg["filename"]
 
-    def _get_binary_path(self) -> Optional[Path]:
-        """Find llamafile binary and ensure it's executable."""
+    def _binary_candidates(self) -> List[Path]:
         plugin_dir = Path(PLUGIN_DIR)
-        runtime_bin_dir = self.runtime_dir / "bin"
-
-        candidates = [
-            runtime_bin_dir / "llamafile",
+        return [
+            self.runtime_dir / "bin" / "llamafile",
             plugin_dir / "bin" / "llamafile",
             plugin_dir / "bin" / "llamafile-0.9.3",
             Path.home() / "homebrew" / "plugins" / "DeckyNews" / "bin" / "llamafile",
             plugin_dir / "bin" / "llama-cli",
             plugin_dir / "bin" / "main",
             Path.home() / "homebrew" / "plugins" / "DeckyNews" / "bin" / "llama-cli",
+            Path("/usr/local/bin/llama-cli"),
         ]
 
-        for path in candidates:
-            if not path.exists():
-                continue
+    def _ensure_executable(self, path: Path) -> bool:
+        """Return True if path is executable (fixing permissions if needed)."""
+        binary_type = "llamafile" if "llamafile" in path.name else "llama-cli"
+        if os.access(path, os.X_OK):
+            decky.logger.info(f"Found executable {binary_type} binary: {path}")
+            return True
+        decky.logger.warning(f"Binary found but not executable: {path} (type: {binary_type})")
+        try:
+            import stat
+            path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            if os.access(path, os.X_OK):
+                decky.logger.info(f"Fixed permissions for {binary_type}: {path}")
+                return True
+        except (OSError, PermissionError) as e:
+            decky.logger.error(f"Failed to fix permissions for {path}: {e}")
+        return False
 
-            is_executable = os.access(path, os.X_OK)
-            binary_type = "llamafile" if "llamafile" in path.name else "llama-cli"
-
-            if not is_executable:
-                decky.logger.warning(f"Binary found but not executable: {path} (type: {binary_type})")
-                try:
-                    import stat
-                    current_mode = path.stat().st_mode
-                    path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-                    if os.access(path, os.X_OK):
-                        decky.logger.info(f"Fixed permissions for {binary_type}: {path}")
-                        return path
-                except (OSError, PermissionError) as e:
-                    decky.logger.error(f"Failed to fix permissions for {path}: {e}")
-                    continue
-            else:
-                decky.logger.info(f"Found executable {binary_type} binary: {path}")
+    def _get_binary_path(self) -> Optional[Path]:
+        """Find llamafile binary and ensure it's executable."""
+        for path in self._binary_candidates():
+            if path.exists() and self._ensure_executable(path):
                 return path
-
         return None
+
+    @staticmethod
+    def _download_file(url: str, dest: Path, label: str) -> None:
+        """Download url to dest via a temp file. Raises on failure."""
+        import urllib.request
+        import ssl
+        import shutil
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = dest.with_suffix('.tmp')
+        context = ssl._create_unverified_context()
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        with urllib.request.urlopen(req, context=context) as response:
+            total_size = int(response.headers.get('content-length', 0))
+            decky.logger.info(f"{label} size: {total_size / 1024 / 1024:.1f} MB")
+            with open(temp_path, 'wb') as f:
+                shutil.copyfileobj(response, f)
+        temp_path.rename(dest)
 
     def is_binary_available(self) -> bool:
         """Check if the llama-cli binary is available."""
@@ -707,111 +675,47 @@ class SummarizationManager:
         if self.is_model_downloaded():
             decky.logger.info("Model already downloaded")
             return True
-
         if self._model_load_lock.locked():
             decky.logger.warning("Model download already in progress")
             return False
-
         async with self._model_load_lock:
-            # Capture model path NOW to prevent race condition
-            target_model_path = self.model_path
-
+            target_model_path = self.model_path  # capture before lock release to avoid race
             self._download_progress = 0.0
-
             try:
+                cfg = self._get_active_config()
+                model_url = f"https://huggingface.co/{cfg['repo']}/resolve/main/{cfg['filename']}"
                 decky.logger.info(f"Downloading model to: {target_model_path}")
-
-                def _download():
-                    import urllib.request
-                    import ssl
-                    import shutil
-
-                    cfg = self._get_active_config()
-                    model_url = f"https://huggingface.co/{cfg['repo']}/resolve/main/{cfg['filename']}"
-
-                    target_model_path.parent.mkdir(parents=True, exist_ok=True)
-                    temp_path = target_model_path.with_suffix('.tmp')
-
-                    context = ssl._create_unverified_context()
-
-                    # Add browser-like User-Agent to bypass HuggingFace CDN blocks
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
-                    req = urllib.request.Request(model_url, headers=headers)
-
-                    with urllib.request.urlopen(req, context=context) as response:
-                        total_size = int(response.headers.get('content-length', 0))
-                        decky.logger.info(f"Model size: {total_size / 1024 / 1024:.1f} MB")
-
-                        with open(temp_path, 'wb') as f:
-                            shutil.copyfileobj(response, f)
-
-                    temp_path.rename(target_model_path)
-                    return str(target_model_path)
-
-                # Run download in executor
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(self.executor, _download)
-
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    self.executor,
+                    lambda: self._download_file(model_url, target_model_path, "Model")
+                )
                 self._download_progress = 100.0
                 decky.logger.info(f"Model downloaded to: {target_model_path}")
                 return True
-
             except Exception as e:
                 decky.logger.error(f"Model download failed: {e}")
                 self.circuit_breaker.record_failure()
-                if target_model_path.with_suffix('.tmp').exists():
-                    target_model_path.with_suffix('.tmp').unlink()
+                target_model_path.with_suffix('.tmp').unlink(missing_ok=True)
                 return False
 
     async def download_binary(self) -> bool:
         """Download llamafile binary from GitHub releases."""
         binary_url = "https://github.com/Mozilla-Ocho/llamafile/releases/download/0.9.3/llamafile-0.9.3"
-        binary_name = "llamafile"
-        binary_path = self.runtime_dir / "bin" / binary_name
-
+        binary_path = self.runtime_dir / "bin" / "llamafile"
         try:
             decky.logger.info(f"Downloading llamafile binary from: {binary_url}")
-
-            def _download():
-                import urllib.request
-                import ssl
-                import shutil
-                import stat
-
-                binary_path.parent.mkdir(parents=True, exist_ok=True)
-                temp_path = binary_path.with_suffix('.tmp')
-
-                context = ssl._create_unverified_context()
-
-                # Add browser-like User-Agent for GitHub/CDN compatibility
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-                req = urllib.request.Request(binary_url, headers=headers)
-
-                with urllib.request.urlopen(req, context=context) as response:
-                    total_size = int(response.headers.get('content-length', 0))
-                    decky.logger.info(f"Download size: {total_size / 1024 / 1024:.1f} MB")
-
-                    with open(temp_path, 'wb') as f:
-                        shutil.copyfileobj(response, f)
-
-                temp_path.rename(binary_path)
+            import stat
+            def _fetch_and_chmod():
+                self._download_file(binary_url, binary_path, "Binary")
                 binary_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
-                return str(binary_path)
-
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(self.executor, _download)
-
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(self.executor, _fetch_and_chmod)
             decky.logger.info(f"Binary downloaded to: {binary_path}")
             return True
-
         except Exception as e:
             decky.logger.error(f"Binary download failed: {e}")
-            if binary_path.with_suffix('.tmp').exists():
-                binary_path.with_suffix('.tmp').unlink()
+            binary_path.with_suffix('.tmp').unlink(missing_ok=True)
             return False
 
     async def load_model(self) -> tuple:
@@ -987,7 +891,7 @@ class SummarizationManager:
 
                 return None
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             text = await asyncio.wait_for(
                 loop.run_in_executor(self.executor, _extract),
                 timeout=self._get_active_config()["timeout_seconds"]
@@ -1041,7 +945,7 @@ class SummarizationManager:
         cleaned = output.strip()
 
         # Remove any trailing incomplete sentences
-        if cleaned and not cleaned[-1] in '.!?':
+        if cleaned and cleaned[-1] not in '.!?':
             last_period = cleaned.rfind('.')
             if last_period > len(cleaned) // 2:
                 cleaned = cleaned[:last_period + 1]
@@ -1065,7 +969,7 @@ class SummarizationManager:
 
             if idle_time >= self._idle_timeout_seconds:
                 decky.logger.info(f"[LLM] Idle timeout reached ({idle_time:.1f}s), unloading model")
-                await self.unload_model()
+                self.unload_model()
                 self._last_activity_time = None
 
     async def summarize_article(self, url: str, title: str = "", allow_during_gaming: bool = False) -> Dict:
@@ -1131,9 +1035,32 @@ class SummarizationManager:
             return result
 
         try:
-            # Extract article text with timing
+            # Sync resource snapshot — no I/O, fast
+            active_cfg = self._get_active_config()
+            soft_threshold = self.resource_monitor.max_temp_celsius - 5
+            current_temp = self.resource_monitor._get_cpu_temperature()
+            running_hot = current_temp is not None and current_temp > soft_threshold
+
+            if self._adaptive_tokens_enabled and running_hot:
+                effective_tokens = self._reduced_token_count
+                decky.logger.info(f"[LLM] Adaptive tokens: {current_temp:.1f}°C > {soft_threshold}°C, using {effective_tokens} tokens")
+            else:
+                effective_tokens = active_cfg["max_gen_tokens"]
+
+            # Article fetch and adaptive thread count run concurrently
+            async def _get_threads():
+                if self._adaptive_threads_enabled:
+                    n = await self.resource_monitor.get_adaptive_thread_count()
+                    count = 1 if running_hot else n
+                    decky.logger.info(f"[LLM] Adaptive threads: {count} (hot={running_hot})")
+                    return count
+                return LLM_GLOBAL["n_threads"]
+
             fetch_start = time.time()
-            article_text = await self.extract_article_text(url)
+            article_text, effective_threads = await asyncio.gather(
+                self.extract_article_text(url),
+                _get_threads(),
+            )
             fetch_duration = time.time() - fetch_start
 
             if not article_text:
@@ -1141,29 +1068,8 @@ class SummarizationManager:
                 self.circuit_breaker.record_failure()
                 return result
 
-            # Store article text and fetch timing for telemetry
-            result["_article_text"] = article_text  # Internal: for telemetry only
+            result["_article_text"] = article_text
             result["_fetch_duration"] = fetch_duration
-
-            # Determine adaptive token budget
-            active_cfg = self._get_active_config()
-            soft_threshold = self.resource_monitor.max_temp_celsius - 5
-            current_temp = self.resource_monitor._get_cpu_temperature()
-            running_hot = current_temp is not None and current_temp > soft_threshold
-            if self._adaptive_tokens_enabled and running_hot:
-                effective_tokens = self._reduced_token_count
-                decky.logger.info(f"[LLM] Adaptive tokens: {current_temp:.1f}°C > {soft_threshold}°C, using {effective_tokens} tokens")
-            else:
-                effective_tokens = active_cfg["max_gen_tokens"]
-
-            # Determine adaptive thread count
-            if self._adaptive_threads_enabled:
-                effective_threads = await self.resource_monitor.get_adaptive_thread_count()
-                if running_hot:
-                    effective_threads = 1
-                decky.logger.info(f"[LLM] Adaptive threads: {effective_threads} (hot={running_hot})")
-            else:
-                effective_threads = LLM_GLOBAL["n_threads"]
 
             # Run inference via subprocess with timeout
             def _inference():
@@ -1189,7 +1095,7 @@ class SummarizationManager:
                         prompt_format=active_cfg["prompt_format"],
                     )
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             inference_result = await asyncio.wait_for(
                 loop.run_in_executor(self.executor, _inference),
                 timeout=active_cfg["timeout_seconds"]
@@ -1263,31 +1169,16 @@ class SummarizationManager:
     def get_load_diagnostics(self) -> Dict:
         """Return detailed diagnostics for debugging model loading issues."""
         binary_path = self._get_binary_path()
-        plugin_dir = Path(PLUGIN_DIR)
-
-        # List all binary candidates that were checked
-        binary_candidates = [
-            str(plugin_dir / "bin" / "llama-cli"),
-            str(plugin_dir / "bin" / "main"),
-            str(Path.home() / "homebrew" / "plugins" / "DeckyNews" / "bin" / "llama-cli"),
-        ]
-
-        # Check which candidates exist
-        candidates_status = {}
-        for candidate in binary_candidates:
-            p = Path(candidate)
-            candidates_status[candidate] = {
-                "exists": p.exists(),
-                "executable": os.access(candidate, os.X_OK) if p.exists() else False
-            }
-
+        candidates_status = {
+            str(p): {"exists": p.exists(), "executable": os.access(str(p), os.X_OK) if p.exists() else False}
+            for p in self._binary_candidates()
+        }
         model_size = 0
         if self.model_path.exists():
             try:
                 model_size = self.model_path.stat().st_size
             except Exception:
                 pass
-
         return {
             "model_path": str(self.model_path),
             "model_exists": self.model_path.exists(),
@@ -1402,7 +1293,7 @@ class NewsFetcher:
                         decky.logger.warning(f"Feed truncated at 5MB: {source_id}")
                         break
                 content = buf.decode(response.charset or 'utf-8', errors='replace')
-                feed = feedparser.parse(content)
+                feed = await asyncio.get_running_loop().run_in_executor(None, feedparser.parse, content)
 
                 if not feed.entries:
                     raise Exception("No entries in feed")
@@ -1411,14 +1302,14 @@ class NewsFetcher:
                 for entry in feed.entries[:20]:
                     published = entry.get('published_parsed') or entry.get('updated_parsed')
                     if published:
-                        pub_datetime = datetime(*published[:6])
+                        pub_datetime = datetime(*published[:6], tzinfo=timezone.utc)
                     else:
-                        pub_datetime = datetime.now()
+                        pub_datetime = datetime.now(timezone.utc)
 
                     articles.append({
                         'title': entry.get('title', 'No title'),
                         'link': entry.get('link', ''),
-                        'published': pub_datetime.isoformat() + 'Z',
+                        'published': pub_datetime.isoformat(),
                         'source': source_id,
                         'content': entry.get('summary', ''),
                         'image_url': get_static_logo_url(source_id),
@@ -1426,7 +1317,7 @@ class NewsFetcher:
                     })
 
                 # Insert articles into database
-                result = await asyncio.get_event_loop().run_in_executor(None, self.db.insert_articles, articles)
+                result = await asyncio.get_running_loop().run_in_executor(None, self.db.insert_articles, articles)
 
                 self.source_health[source_id] = 'ok'
                 self.failure_counts[source_id] = 0
@@ -1493,9 +1384,10 @@ class Plugin:
                 with open(sources_file, 'r', encoding='utf-8') as f:
                     loaded_sources = json.load(f)
 
-                # Validate format (must be dict with string values)
+                # Validate format (must be dict with http/https URL values)
                 if isinstance(loaded_sources, dict) and all(
-                    isinstance(k, str) and isinstance(v, str)
+                    isinstance(k, str) and isinstance(v, str) and
+                    urlparse(v).scheme in ('http', 'https')
                     for k, v in loaded_sources.items()
                 ):
                     NEWS_SOURCES = loaded_sources
@@ -1598,7 +1490,16 @@ class Plugin:
         enabled_sources = self.settings.get('sourcesEnabled', [])
         decky.logger.info(f"Scheduling initial fetch for sources: {enabled_sources}")
 
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.get_running_loop()
+
+        # Pre-warm lazy imports so the first summarization pays no cold-start cost
+        async def _prewarm():
+            try:
+                await self.loop.run_in_executor(None, _get_readability)
+                await self.loop.run_in_executor(None, _get_cloudscraper)
+            except Exception:
+                pass
+        self.loop.create_task(_prewarm())
 
         # Start idle timeout monitor for LLM
         self.idle_monitor_task = self.loop.create_task(
@@ -1606,6 +1507,15 @@ class Plugin:
         )
 
         self.refresh_task = self.loop.create_task(self._initial_fetch_and_refresh_loop())
+
+    def _run_deduplication(self) -> int:
+        if not self.deduplicator:
+            return 0
+        articles = self.db_manager.get_all_articles_for_deduplication(max_articles=500)
+        groups = self.deduplicator.find_duplicates(articles)
+        if groups:
+            self.deduplicator.mark_duplicates_in_db(self.db_manager, groups)
+        return len(groups)
 
     async def _initial_fetch_and_refresh_loop(self):
         for attempt in range(5):
@@ -1633,16 +1543,11 @@ class Plugin:
                 enabled_sources = self.settings.get('sourcesEnabled', [])
                 await self.news_fetcher.fetch_all_sources(enabled_sources)
 
-                # Run deduplication if enabled
-                if self.deduplicator:
-                    articles = self.db_manager.get_all_articles_for_deduplication(max_articles=500)
-                    groups = self.deduplicator.find_duplicates(articles)
-                    if groups:
-                        self.deduplicator.mark_duplicates_in_db(self.db_manager, groups)
+                self._run_deduplication()
 
                 # Database maintenance (vacuum old articles)
                 if self.settings.get("autoVacuumEnabled", True):
-                    await asyncio.get_event_loop().run_in_executor(None, self.db_manager.vacuum_old_articles)
+                    await asyncio.get_running_loop().run_in_executor(None, self.db_manager.vacuum_old_articles)
 
                 await decky.emit("news_refreshed", {"timestamp": datetime.now().isoformat()})
 
@@ -1746,17 +1651,13 @@ class Plugin:
             successful = await self.news_fetcher.fetch_all_sources(enabled_sources)
             decky.logger.info(f"Manual refresh completed: {successful}/{len(enabled_sources)} sources successful")
 
-            # Run deduplication if enabled
-            if self.deduplicator:
-                articles = self.db_manager.get_all_articles_for_deduplication(max_articles=500)
-                groups = self.deduplicator.find_duplicates(articles)
-                if groups:
-                    self.deduplicator.mark_duplicates_in_db(self.db_manager, groups)
-                    decky.logger.info(f"Deduplication: found {len(groups)} duplicate groups")
+            group_count = self._run_deduplication()
+            if group_count:
+                decky.logger.info(f"Deduplication: found {group_count} duplicate groups")
 
             # Vacuum old articles (30+ days) and run VACUUM if needed
             if self.settings.get("autoVacuumEnabled", True):
-                vacuum_result = self.db_manager.vacuum_old_articles()
+                vacuum_result = await asyncio.get_running_loop().run_in_executor(None, self.db_manager.vacuum_old_articles)
                 if vacuum_result['deleted_count'] > 0 or vacuum_result['vacuumed']:
                     decky.logger.info(
                         f"Database maintenance: deleted {vacuum_result['deleted_count']} old articles, "

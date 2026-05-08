@@ -142,12 +142,12 @@ class LlamaCppSubprocess:
 
         if proc.returncode == 0:
             output = stdout.strip()
-            if "<|im_end|>" in output:
-                output = output.split("<|im_end|>")[0].strip()
-            if "<|eot_id|>" in output:
-                output = output.split("<|eot_id|>")[0].strip()
+            for sep in ("<|im_end|>", "<|eot_id|>"):
+                if sep in output:
+                    output = output.split(sep)[0]
+            output = output.strip()
 
-            output = re.sub(r'<think>.*?</think>', '', output, flags=re.DOTALL).strip()
+            output = re.sub(r'<think>(?:.*?</think>|.*)', '', output, flags=re.DOTALL).strip()
 
             for prefix in ("Here is the summary of the article:", "Here is a summary of the article:", "Here is a summary:", "Summary:"):
                 if output.lower().startswith(prefix.lower()):

@@ -112,7 +112,7 @@ def run_command(cmd: List[str], check: bool = True) -> Tuple[bool, str]:
             check=check,
             shell=use_shell
         )
-        return True, result.stdout + result.stderr
+        return result.returncode == 0, result.stdout + result.stderr
     except subprocess.CalledProcessError as e:
         return False, e.stdout + e.stderr
     except FileNotFoundError:
@@ -178,7 +178,10 @@ def copy_plugin_files() -> bool:
         src = Path(src_name)
         dst = BUNDLE_DIR / dst_name
         if src.exists():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            # src/ contains both Python backend files AND TypeScript source files.
+            # Only the Python files belong in the bundle; TS files are compiled to dist/.
+            ignore = shutil.ignore_patterns('*.ts', '*.tsx', 'components') if src_name == "src" else None
+            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
             print_ok(f"Copied {src_name}/ -> {dst_name}/")
 
             if dst.name == "bin":
@@ -234,12 +237,23 @@ def install_python_deps(skip_llm: bool = False) -> bool:
     # ALL dependencies - combining pure Python and binary packages
     # CRITICAL: All deps must be downloaded in ONE pip invocation for correct transitive resolution
     # NOTE: Include ALL transitive dependencies explicitly to avoid pip download issues
-    all_deps = [
+    # C extensions: must be Linux x86_64 binary wheels.
+    # Use --no-deps because their Python-package deps are all in pure_python_deps.
+    c_extension_deps = [
+        "lxml",
+        "psutil",
+        "Levenshtein",
+        "rapidfuzz",   # required by Levenshtein >= 0.21
+    ]
+
+    # Pure Python packages: no platform constraints needed; pip3-none-any wheels
+    # run on any platform including Steam Deck.
+    pure_python_deps = [
         "feedparser",
+        "sgmllib3k",
         "certifi",
         "attrs",
         "idna",
-        "sgmllib3k",
         "cloudscraper",
         "readability-lxml",
         "lxml-html-clean",
@@ -250,31 +264,36 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         "pyparsing",
         "charset-normalizer",
         "urllib3",
-        "lxml",
-        "psutil",
-        "python-Levenshtein",
-        "Levenshtein",
     ]
 
-    # Download ALL packages in SINGLE invocation for proper transitive dependency resolution
-    # Using multiple --platform flags to match broadest set of manylinux wheels
-    print("  Downloading all dependencies (including transitive) in single resolution pass...")
-    cmd = [
+    print("  Downloading C-extension wheels (Linux x86_64)...")
+    cmd_binary = [
         sys.executable, "-m", "pip", "download",
         "--dest", str(PY_MODULES_DIR),
-        "--platform", "manylinux_2_17_x86_64",  # Broadest compatibility
+        "--platform", "manylinux_2_17_x86_64",
         "--platform", "manylinux_2_28_x86_64",
         "--platform", "manylinux2014_x86_64",
         "--python-version", "311",
         "--only-binary", ":all:",
-    ] + all_deps
+        "--no-deps",
+    ] + c_extension_deps
 
-    success, output = run_command(cmd, check=False)
-
+    success, output = run_command(cmd_binary, check=False)
     if not success:
-        print_error("Failed to download Linux x86_64 wheels.")
-        print_error("Cannot fall back to local platform - would produce incompatible binaries.")
-        print_error(f"pip output:\n{output[:1000]}")
+        print_error("Failed to download Linux x86_64 C-extension wheels.")
+        print_error(f"pip output:\n{output[-2000:]}")
+        return False
+
+    print("  Downloading pure-Python packages...")
+    cmd_pure = [
+        sys.executable, "-m", "pip", "download",
+        "--dest", str(PY_MODULES_DIR),
+    ] + pure_python_deps
+
+    success, output = run_command(cmd_pure, check=False)
+    if not success:
+        print_error("Failed to download pure-Python packages.")
+        print_error(f"pip output:\n{output[-2000:]}")
         return False
 
     # List what was downloaded
@@ -285,10 +304,9 @@ def install_python_deps(skip_llm: bool = False) -> bool:
     print("  Verifying critical packages and transitive dependencies...")
     critical_checks = {
         "feedparser": "feedparser",
-        "rapidfuzz": "rapidfuzz",
         "Levenshtein": "Levenshtein",
+        "rapidfuzz": "rapidfuzz",
         "lxml": "lxml",
-        "lxml_html_clean": "lxml_html_clean",
         "cssselect": "cssselect",
         "chardet": "chardet",
         "certifi": "certifi",
@@ -299,9 +317,8 @@ def install_python_deps(skip_llm: bool = False) -> bool:
 
     missing_critical = []
     for pkg_name, file_prefix in critical_checks.items():
-        # Check if any downloaded file contains this package name
         variants = [file_prefix, file_prefix.replace("_", "-"), file_prefix.replace("-", "_")]
-        if not any(variant in f.name.lower() for variant in variants for f in downloaded_files):
+        if not any(v.lower() in f.name.lower() for v in variants for f in downloaded_files):
             missing_critical.append(pkg_name)
 
     if missing_critical:
@@ -477,7 +494,7 @@ def validate_bundle() -> bool:
                 try:
                     info = zf.getinfo(name)
                     size_without_llamafile -= info.compress_size
-                except:
+                except Exception:
                     pass
 
         size_without_llamafile_mb = size_without_llamafile / (1024 * 1024)
