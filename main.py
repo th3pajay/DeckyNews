@@ -1264,6 +1264,7 @@ class NewsFetcher:
             if stored_lastmod:
                 conditional_headers['If-Modified-Since'] = stored_lastmod
 
+            _rss_t0 = time.perf_counter()
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), headers=conditional_headers) as response:
                 if response.status == 304:
                     self.source_health[source_id] = 'ok'
@@ -1293,6 +1294,8 @@ class NewsFetcher:
                         decky.logger.warning(f"Feed truncated at 5MB: {source_id}")
                         break
                 content = buf.decode(response.charset or 'utf-8', errors='replace')
+                _rss_lat = time.perf_counter() - _rss_t0
+                decky.logger.debug(f"{source_id}: rss_lat={_rss_lat:.3f}s")
                 feed = await asyncio.get_running_loop().run_in_executor(None, feedparser.parse, content)
 
                 if not feed.entries:
@@ -1512,7 +1515,9 @@ class Plugin:
         if not self.deduplicator:
             return 0
         articles = self.db_manager.get_all_articles_for_deduplication(max_articles=500)
+        _dedup_t0 = time.perf_counter()
         groups = self.deduplicator.find_duplicates(articles)
+        self._last_dedup_lat = time.perf_counter() - _dedup_t0
         if groups:
             self.deduplicator.mark_duplicates_in_db(self.db_manager, groups)
         return len(groups)

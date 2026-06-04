@@ -17,6 +17,7 @@ import { NewsArticle, Settings, SourceHealth, LLMStatus } from "./types";
 import { getNews, refreshNews, getSourceHealth, getSettings, getLLMStatus } from "./api";
 import { NewsItem, SkeletonArticle } from "./components/NewsItem";
 import { Settings as SettingsComponent } from "./components/Settings";
+import { formatRefreshTime } from "./utils";
 
 declare global {
   interface Window {
@@ -117,13 +118,17 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [sourceHealth, setSourceHealth] = useState<SourceHealth>({});
-  const [pullDistance, setPullDistance] = useState(0);
+  const pullDistanceRef = useRef(0);
+  const pullIndicatorRef = useRef<HTMLDivElement>(null);
+  const pullSpinnerRef = useRef<HTMLDivElement>(null);
+  const [pullStage, setPullStage] = useState(0);
   const [touchStartY, setTouchStartY] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
   const [fadeIn, setFadeIn] = useState(true);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [backdropImage] = useState<string | null>(null);
+  const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
+  const backdropImage = null;
 
   const pageRef = useRef(page);
   const totalPagesRef = useRef(totalPages);
@@ -213,6 +218,14 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
     return () => reg?.unregister();
   }, []);
 
+  useEffect(() => {
+    const listener = addEventListener<[data: { timestamp: string }]>(
+      "news_refreshed",
+      (data) => setLastRefreshed(data.timestamp)
+    );
+    return () => removeEventListener("news_refreshed", listener);
+  }, []);
+
   // If showing settings, render Settings component
   if (showSettings && onBackToNews) {
     return <SettingsComponent onBack={onBackToNews} />;
@@ -241,7 +254,6 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
       console.error("Failed to refresh:", error);
     } finally {
       setRefreshing(false);
-      setPullDistance(0);
     }
   };
 
@@ -253,23 +265,27 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
 
   const handleTouchMove = (e: React.TouchEvent) => {
     if (scrollTop > 5) return;
+    const distance = e.touches[0].clientY - touchStartY;
+    if (distance <= 0 || distance >= 120) return;
+    pullDistanceRef.current = distance;
 
-    const touchY = e.touches[0].clientY;
-    const distance = touchY - touchStartY;
-
-    if (distance > 0 && distance < 120) {
-      setPullDistance(distance);
+    const ind = pullIndicatorRef.current;
+    if (ind) {
+      ind.style.transform = `translateY(${Math.min(distance * 0.5, 60)}px)`;
+      ind.style.opacity = String(Math.min(distance / 40, 1));
     }
+    const sp = pullSpinnerRef.current;
+    if (sp) sp.style.transform = `rotate(${(Math.min(Math.round((distance / 80) * 100), 100) / 100) * 360}deg)`;
+
+    const newStage = distance > 10 ? getPullStage(distance) : 0;
+    setPullStage(s => s !== newStage ? newStage : s);
   };
 
   const handleTouchEnd = async () => {
-    if (pullDistance > 80 && !refreshing) {
-      // Reset pull distance BEFORE triggering refresh to hide indicator immediately
-      setPullDistance(0);
-      handleRefresh();
-    } else {
-      setPullDistance(0);
-    }
+    const dist = pullDistanceRef.current;
+    pullDistanceRef.current = 0;
+    setPullStage(0);
+    if (dist > 80 && !refreshing) handleRefresh();
   };
 
   const getPullStage = (distance: number) => {
@@ -278,9 +294,6 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
     return 3;
   };
 
-  const getPullProgress = (distance: number) => {
-    return Math.min(Math.round((distance / 80) * 100), 100);
-  };
 
   const getPullText = (stage: number, refreshing: boolean) => {
     if (refreshing) return "Refreshing news...";
@@ -292,7 +305,6 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
     }
   };
 
-  const showPullIndicator = pullDistance > 10 && !refreshing;
 
   return (
     <Focusable
@@ -307,8 +319,9 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
           visible={false}
         />
       )}
-      {showPullIndicator && (
+      {pullStage > 0 && !refreshing && (
         <div
+          ref={pullIndicatorRef}
           style={{
             position: "absolute",
             top: 0,
@@ -320,8 +333,8 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
             justifyContent: "center",
             padding: "16px",
             background: "linear-gradient(to bottom, rgba(27, 40, 56, 0.95) 0%, rgba(27, 40, 56, 0) 100%)",
-            transform: `translateY(${Math.min(pullDistance * 0.5, 60)}px)`,
-            opacity: Math.min(pullDistance / 40, 1),
+            transform: "translateY(0px)",
+            opacity: 0,
             transition: "transform 0.3s ease, opacity 0.3s ease",
           }}
         >
@@ -334,18 +347,19 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
             }}
           >
             <div
+              ref={pullSpinnerRef}
               style={{
                 width: "40px",
                 height: "40px",
                 borderRadius: "50%",
                 border: "3px solid rgba(26, 159, 255, 0.2)",
                 borderTopColor: "#1a9fff",
-                transform: `rotate(${(getPullProgress(pullDistance) / 100) * 360}deg)`,
+                transform: "rotate(0deg)",
                 transition: "all 0.3s ease",
                 animation: refreshing ? "spin 1s linear infinite" : "none",
               }}
             />
-            {getPullStage(pullDistance) === 3 && !refreshing && (
+            {pullStage === 3 && !refreshing && (
               <span
                 style={{
                   position: "absolute",
@@ -365,21 +379,17 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
               fontSize: "13px",
               fontWeight: 600,
               textAlign: "center",
-              color: getPullStage(pullDistance) >= 2 ? "#1a9fff" : "#8b8f98",
+              color: pullStage >= 2 ? "#1a9fff" : "#8b8f98",
             }}
           >
-            {getPullText(getPullStage(pullDistance), refreshing)}
+            {getPullText(pullStage, refreshing)}
           </div>
-          <div
-            style={{
-              fontSize: "11px",
-              color: "#8b8f98",
-              fontVariantNumeric: "tabular-nums",
-              marginTop: "4px",
-            }}
-          >
-            {getPullProgress(pullDistance)}%
-          </div>
+        </div>
+      )}
+
+      {lastRefreshed && (
+        <div style={{ fontSize: "10px", color: "#8b8f98", textAlign: "right", padding: "2px 12px 0" }}>
+          Last refreshed: {formatRefreshTime(lastRefreshed)}
         </div>
       )}
 

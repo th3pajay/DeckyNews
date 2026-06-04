@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Focusable } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { FaSpinner } from "react-icons/fa";
+import { LineChart, Line, XAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { getTelemetryHeatmap, exportTelemetryDossier, clearTelemetryData } from "../api";
 import { HeatmapCell as HeatmapCellData, TelemetryHeatmapResponse, ExportDossierResponse } from "../types";
 
@@ -259,6 +260,92 @@ const MetricInspector: React.FC<MetricInspectorProps> = ({ cell, onClose }) => {
 
 export { MetricInspector };
 
+const LINE_SERIES = [
+  { key: "tps",            label: "TPS",     color: "#1a9fff" },
+  { key: "cpu_peak_temp",  label: "CPU °C",  color: "#ff6b6b" },
+  { key: "flesch_score",   label: "Flesch",  color: "#51cf66" },
+  { key: "ai_probability", label: "AI %",    color: "#ffd43b" },
+  { key: "ram_delta_mb",   label: "RAM MB",  color: "#cc5de8" },
+] as const;
+
+const TimeSeriesChart: React.FC<{ data: HeatmapCellData[] }> = ({ data }) => {
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+
+  const chartData = data.map(cell => {
+    const t = new Date(cell.timestamp * 1000);
+    return {
+      t: `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`,
+      tps: cell.tps ?? null,
+      cpu_peak_temp: cell.cpu_peak_temp ?? null,
+      flesch_score: cell.flesch_score ?? null,
+      ai_probability: cell.ai_probability != null ? +(cell.ai_probability * 100).toFixed(1) : null,
+      ram_delta_mb: cell.ram_delta_mb ?? null,
+    };
+  });
+
+  const toggle = (key: string) =>
+    setHidden(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+
+  if (data.length === 0) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px', color: '#8b8f98', fontSize: '13px' }}>
+        No data to chart
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: '12px 8px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '10px' }}>
+        {LINE_SERIES.map(s => (
+          <Focusable
+            key={s.key}
+            style={{
+              padding: '3px 9px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              cursor: 'pointer',
+              background: hidden.has(s.key) ? 'rgba(61,68,80,0.3)' : `${s.color}22`,
+              border: `1px solid ${hidden.has(s.key) ? '#3d4450' : s.color}`,
+              color: hidden.has(s.key) ? '#8b8f98' : s.color,
+              transition: 'all 0.15s',
+            }}
+            onActivate={() => toggle(s.key)}
+          >
+            {s.label}
+          </Focusable>
+        ))}
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -24 }}>
+          <XAxis dataKey="t" tick={{ fontSize: 9, fill: '#8b8f98' }} interval="preserveStartEnd" />
+          <Tooltip
+            contentStyle={{ background: '#1b2838', border: '1px solid #3d4450', fontSize: '11px', padding: '6px' }}
+            labelStyle={{ color: '#e8eaed' }}
+            itemStyle={{ color: '#b8bcbf' }}
+          />
+          {LINE_SERIES.map(s => (
+            <Line
+              key={s.key}
+              type="monotone"
+              dataKey={s.key}
+              stroke={s.color}
+              strokeWidth={1.5}
+              dot={false}
+              connectNulls={false}
+              hide={hidden.has(s.key)}
+              name={s.label}
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ fontSize: '10px', color: '#8b8f98', marginTop: '6px', textAlign: 'center' }}>
+        AI % = ai_probability × 100 · tap legend to toggle
+      </div>
+    </div>
+  );
+};
+
 export const TelemetrySummaryStrip: React.FC = () => {
   const [stats, setStats] = useState<{ sessionCount: number; avgTps: number | null; peakTemp: number | null } | null>(null);
 
@@ -304,6 +391,7 @@ export const ForensicHeatmap: React.FC<ForensicHeatmapProps> = ({ hours = 6, onC
   const [data, setData] = useState<HeatmapCellData[]>([]);
   const [selectedCell, setSelectedCell] = useState<HeatmapCellData | null>(null);
   const [colorBy, setColorBy] = useState<'tps' | 'temp'>('tps');
+  const [view, setView] = useState<'heatmap' | 'graph'>('heatmap');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -384,8 +472,26 @@ export const ForensicHeatmap: React.FC<ForensicHeatmapProps> = ({ hours = 6, onC
             Last {hours} hours • {Math.min(data.length, 60)} sessions{data.length > 60 ? ` (of ${data.length})` : ''}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          {(['tps', 'temp'] as const).map(mode => (
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          {(['heatmap', 'graph'] as const).map(v => (
+            <Focusable
+              key={v}
+              style={{
+                padding: '4px 10px',
+                background: view === v ? 'rgba(26, 159, 255, 0.25)' : 'rgba(61, 68, 80, 0.3)',
+                border: `1px solid ${view === v ? 'rgba(26, 159, 255, 0.6)' : 'rgba(61, 68, 80, 0.6)'}`,
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '11px',
+                color: view === v ? '#1a9fff' : '#b8bcbf',
+                transition: 'all 0.15s',
+              }}
+              onActivate={() => setView(v)}
+            >
+              {v === 'heatmap' ? 'Heatmap' : 'Graph'}
+            </Focusable>
+          ))}
+          {view === 'heatmap' && (['tps', 'temp'] as const).map(mode => (
             <Focusable
               key={mode}
               style={{
@@ -439,6 +545,8 @@ export const ForensicHeatmap: React.FC<ForensicHeatmapProps> = ({ hours = 6, onC
               AI summarization metrics will appear here
             </div>
           </div>
+        ) : view === 'graph' ? (
+          <TimeSeriesChart data={data} />
         ) : (
           <>
           <div style={gridStyle}>

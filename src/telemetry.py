@@ -564,7 +564,6 @@ class TelemetryManager:
         session['cloud_bypass'] = 0.0  # Llamafile is always local
         session['dl_kbps'] = 0.0  # TODO: Track download speed
         if article_url and hasattr(self.plugin, 'db_manager'):
-            dedup_start = time.time()
             try:
                 similarity_hash = self.plugin.db_manager.get_similarity_hash_by_url(article_url)
                 if similarity_hash:
@@ -574,7 +573,8 @@ class TelemetryManager:
                     session['dup_count'] = 0
             except Exception:
                 session['dup_count'] = 0
-            session['dedup_lat'] = time.time() - dedup_start
+            # Use the Levenshtein pass latency recorded in _run_deduplication()
+            session['dedup_lat'] = getattr(self.plugin, '_last_dedup_lat', None)
         else:
             session['dup_count'] = 0
         session['ttl_days'] = 7  # Default TTL

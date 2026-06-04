@@ -6,7 +6,7 @@ Groups similar articles to reduce UI clutter.
 import hashlib
 from collections import defaultdict
 from typing import List, Dict, Optional
-from Levenshtein import distance as levenshtein_distance
+from rapidfuzz.distance import Levenshtein as fuzz_lev
 
 
 class ArticleDeduplicator:
@@ -67,21 +67,19 @@ class ArticleDeduplicator:
             # Cap per-bucket comparisons to prevent O(n²) blowup on very similar content
             if len(bucket) > 50:
                 bucket = bucket[:50]
+            bucket_titles = [a['title'].lower() for a in bucket]
+            matrix = fuzz_lev.cdist(bucket_titles, bucket_titles)
             processed: set = set()
-            for i, article in enumerate(bucket):
+            for i in range(len(bucket)):
                 if i in processed:
                     continue
-                group = [article]
+                group = [bucket[i]]
                 processed.add(i)
-                for j, other in enumerate(bucket[i + 1:], start=i + 1):
+                for j in range(i + 1, len(bucket)):
                     if j in processed:
                         continue
-                    dist = levenshtein_distance(
-                        article['title'].lower(),
-                        other['title'].lower(),
-                    )
-                    if dist <= self.threshold:
-                        group.append(other)
+                    if matrix[i][j] <= self.threshold:
+                        group.append(bucket[j])
                         processed.add(j)
                 if len(group) > 1:
                     groups.append(group)
@@ -109,22 +107,3 @@ class ArticleDeduplicator:
         if coverage_updates:
             db_manager.batch_update_coverage_stats(coverage_updates)
 
-    def get_duplicate_stats(self, articles: List[Dict]) -> Dict[str, int]:
-        """
-        Get statistics about duplicates without modifying database.
-
-        Args:
-            articles: List of article dicts
-
-        Returns:
-            Dict with 'total_articles', 'duplicate_groups', 'total_duplicates'
-        """
-        groups = self.find_duplicates(articles)
-
-        total_duplicates = sum(len(group) - 1 for group in groups)
-
-        return {
-            'total_articles': len(articles),
-            'duplicate_groups': len(groups),
-            'total_duplicates': total_duplicates
-        }

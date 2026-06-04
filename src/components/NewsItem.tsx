@@ -225,6 +225,25 @@ export const QuickPeekCard: FC<QuickPeekCardProps> = ({ article, onClose }) => {
             cursor: "grab"
           }}
         />
+        <Focusable
+          style={{
+            position: "absolute",
+            top: "10px",
+            right: "14px",
+            background: "none",
+            border: "none",
+            color: "#8b8f98",
+            fontSize: "22px",
+            lineHeight: 1,
+            padding: "4px 8px",
+            cursor: "pointer",
+            zIndex: 1002,
+          }}
+          onActivate={onClose}
+          onClick={onClose}
+        >
+          ×
+        </Focusable>
 
         <div style={{ padding: "0 20px 20px", overflowY: "auto", maxHeight: "calc(70vh - 50px)" }}>
           {article.image_url && (
@@ -341,7 +360,7 @@ export const QuickPeekCard: FC<QuickPeekCardProps> = ({ article, onClose }) => {
   );
 };
 
-const ArticleCard: FC<ArticleCardProps> = ({
+const ArticleCard = memo<ArticleCardProps>(({
   article,
   health,
   viewMode,
@@ -500,7 +519,7 @@ const ArticleCard: FC<ArticleCardProps> = ({
       {children}
     </div>
   );
-};
+});
 
 // Skeleton loader component
 export const SkeletonArticle: FC = () => {
@@ -545,7 +564,6 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [wavePhase, setWavePhase] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [accentColor, setAccentColor] = useState<string>("#1a9fff");
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -561,11 +579,6 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
     };
   }, []);
 
-  useEffect(() => {
-    if (!summarizing) return;
-    const id = setInterval(() => setWavePhase(p => (p + 1) % 30), 50);
-    return () => clearInterval(id);
-  }, [summarizing]);
 
   const handleClick = () => {
     // Prevent normal click if long-pressing
@@ -757,21 +770,17 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
                   {summarizing ? (
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
                       {([
-                        { height: 8, offset: 0 },
-                        { height: 14, offset: 10 },
-                        { height: 6, offset: 20 }
-                      ]).map(({ height, offset }, i) => {
-                        const t = ((wavePhase + offset) % 30) / 30;
-                        const opacity = 0.15 + 0.85 * Math.sin(t * Math.PI);
-                        return (
-                          <span key={i} style={{
-                            width: 3, height, borderRadius: 2,
-                            background: "currentColor",
-                            display: "inline-block",
-                            opacity
-                          }} />
-                        );
-                      })}
+                        { height: 8,  delay: "0s"   },
+                        { height: 14, delay: "0.2s" },
+                        { height: 6,  delay: "0.4s" },
+                      ]).map(({ height, delay }, i) => (
+                        <span key={i} style={{
+                          width: 3, height, borderRadius: 2,
+                          background: "currentColor",
+                          display: "inline-block",
+                          animation: `barWave 1.5s ease-in-out ${delay} infinite`,
+                        }} />
+                      ))}
                       <span style={{ marginLeft: 5 }}>Summarizing</span>
                     </span>
                   ) : summary ? (

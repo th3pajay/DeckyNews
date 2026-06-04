@@ -244,9 +244,6 @@ class DatabaseManager:
             for a in articles
         ]
 
-        cursor.execute("SELECT COUNT(*) FROM articles")
-        count_before = cursor.fetchone()[0]
-
         cursor.executemany("""
             INSERT OR IGNORE INTO articles (title, link, published, source, content, image_url, favicon_url)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -254,8 +251,7 @@ class DatabaseManager:
 
         conn.commit()
 
-        cursor.execute("SELECT COUNT(*) FROM articles")
-        inserted = cursor.fetchone()[0] - count_before
+        inserted = cursor.rowcount
 
         return {
             'inserted': inserted,
@@ -368,7 +364,6 @@ class DatabaseManager:
         return self._queue_write(self._vacuum_old_articles_impl)
 
     def _vacuum_old_articles_impl(self) -> Dict[str, Any]:
-        """Internal implementation of vacuum_old_articles."""
         conn = self._get_connection()
         cursor = conn.cursor()
 

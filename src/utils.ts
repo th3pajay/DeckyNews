@@ -125,3 +125,14 @@ export async function extractDominantColor(imageUrl: string): Promise<string> {
     img.src = imageUrl;
   });
 }
+
+export function formatRefreshTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const se = String(d.getSeconds()).padStart(2, "0");
+  return `${mo}.${dd} ${hh}:${mi}:${se}`;
+}
