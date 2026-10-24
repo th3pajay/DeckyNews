@@ -1,56 +1,28 @@
-"""
-Article deduplication using Levenshtein distance.
-Groups similar articles to reduce UI clutter.
-"""
-
 import hashlib
 from collections import defaultdict
-from typing import List, Dict, Optional
+from typing import List, Dict
+from rapidfuzz import process as fuzz_process
 from rapidfuzz.distance import Levenshtein as fuzz_lev
 
 
 class ArticleDeduplicator:
-    """
-    Semantic fuzzy-matching using Levenshtein distance.
-
-    This class identifies duplicate or near-duplicate articles across
-    different sources based on title similarity. Articles within a
-    configurable edit distance threshold are grouped together.
-
-    Example:
-        - "Sony Announces PS5 Pro Release Date"
-        - "Sony announces PS5 Pro release date - Full details"
-        - Edit distance: 18 characters
-
-    The similarity hash provides fast pre-filtering before expensive
-    distance calculations.
-    """
 
     def __init__(self, similarity_threshold: int = 10):
-        """
-        Initialize deduplicator.
-
-        Args:
-            similarity_threshold: Maximum Levenshtein edit distance
-                                 to consider articles as duplicates.
-                                 Lower = stricter matching.
-                                 Typical values: 5-15
-        """
         self.threshold = similarity_threshold
 
     def calculate_similarity_hash(self, title: str) -> str:
-        # Normalize: lowercase + remove punctuation
+
         normalized = title.lower()
         normalized = ''.join(c if c.isalnum() or c.isspace() else ' ' for c in normalized)
 
-        # Remove common stopwords
+
         stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'}
         words = [w for w in normalized.split() if w and w not in stopwords]
 
-        # Sort words to make hash order-independent
+
         words = sorted(set(words))
 
-        # Create hash
+
         text = ' '.join(words)
         return hashlib.md5(text.encode()).hexdigest()[:8]
 
@@ -64,11 +36,11 @@ class ArticleDeduplicator:
         for bucket in buckets.values():
             if len(bucket) < 2:
                 continue
-            # Cap per-bucket comparisons to prevent O(n²) blowup on very similar content
+
             if len(bucket) > 50:
                 bucket = bucket[:50]
             bucket_titles = [a['title'].lower() for a in bucket]
-            matrix = fuzz_lev.cdist(bucket_titles, bucket_titles)
+            matrix = fuzz_process.cdist(bucket_titles, bucket_titles, scorer=fuzz_lev.distance)
             processed: set = set()
             for i in range(len(bucket)):
                 if i in processed:
@@ -106,4 +78,3 @@ class ArticleDeduplicator:
             db_manager.batch_update_similarity_hashes(hash_updates)
         if coverage_updates:
             db_manager.batch_update_coverage_stats(coverage_updates)
-

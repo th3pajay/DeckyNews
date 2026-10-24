@@ -7,17 +7,23 @@ import {
 import {
   addEventListener,
   removeEventListener,
-  definePlugin,
-  toaster
+  definePlugin
 } from "@decky/api";
-import { useState, useEffect, useRef, useCallback, FC, Component } from "react";
-import { FaCog, FaSync, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { useState, useEffect, useLayoutEffect, useRef, FC, Component } from "react";
+import { FaCog, FaSync } from "react-icons/fa";
 
-import { NewsArticle, Settings, SourceHealth, LLMStatus } from "./types";
-import { getNews, refreshNews, getSourceHealth, getSettings, getLLMStatus } from "./api";
-import { NewsItem, SkeletonArticle } from "./components/NewsItem";
+import { NewsArticle } from "./types";
+import { useArticleFeed } from "./hooks/useArticleFeed";
+import { usePullToRefresh } from "./hooks/usePullToRefresh";
+import { pullText } from "./feedLogic";
+import { NewsItem } from "./components/NewsItem";
+import { SkeletonArticle } from "./components/SkeletonArticle";
+import { QuickPeekCard } from "./components/QuickPeekCard";
+import { ActionMenu } from "./components/ActionMenu";
+import { NavFooter } from "./components/NavFooter";
+import { findScroller, openInBrowser } from "./utils";
+
 import { Settings as SettingsComponent } from "./components/Settings";
-import { formatRefreshTime } from "./utils";
 
 declare global {
   interface Window {
@@ -26,299 +32,70 @@ declare global {
   }
 }
 
-const _animStyle = document.createElement('style');
-_animStyle.innerHTML = `
-  @keyframes shimmer { 0%,100% { opacity:0.6; } 50% { opacity:1; } }
-  @keyframes blink { 0%,50% { opacity:1; } 51%,100% { opacity:0; } }
-  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
-  @keyframes barWave { 0%,100% { opacity:0.15; } 50% { opacity:1; } }
-`;
-document.head.appendChild(_animStyle);
-
-interface DynamicBackdropProps {
-  imageUrl: string | null;
-  visible: boolean;
+let animationsInjected = false;
+function injectGlobalAnimations() {
+  if (animationsInjected) return;
+  animationsInjected = true;
+  const style = document.createElement('style');
+  style.innerHTML = `
+    @keyframes shimmer { 0%,100% { opacity:0.6; } 50% { opacity:1; } }
+    @keyframes blink { 0%,50% { opacity:1; } 51%,100% { opacity:0; } }
+    @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+    @keyframes barWave { 0%,100% { opacity:0.15; } 50% { opacity:1; } }
+    @keyframes slideInRight { from { transform:translateX(20px); opacity:0; } to { transform:translateX(0); opacity:1; } }
+  `;
+  document.head.appendChild(style);
 }
 
-const DynamicBackdrop: FC<DynamicBackdropProps> = ({ imageUrl, visible }) => {
-  const [currentImage, setCurrentImage] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (visible && imageUrl) {
-      // Preload image to avoid flicker
-      const img = new Image();
-      img.src = imageUrl;
-      img.onload = () => setCurrentImage(imageUrl);
-      return undefined;
-    } else if (!visible) {
-      // Delay clearing to allow fade-out
-      const timeout = setTimeout(() => setCurrentImage(null), 300);
-      return () => clearTimeout(timeout);
-    }
-    return undefined;
-  }, [imageUrl, visible]);
-
-  if (!currentImage) return null;
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: -1,
-        backgroundImage: `url(${currentImage})`,
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-        filter: "blur(30px) saturate(0.5) brightness(0.3)",
-        opacity: visible ? 1 : 0,
-        transition: "opacity 0.3s ease-in-out",
-        pointerEvents: "none"
-      }}
-    />
-  );
-};
-
-const DEFAULT_SETTINGS: Settings = {
-  refreshInterval: 30,
-  debugMode: false,
-  sourcesEnabled: [],
-  analyticsOptIn: false,
-  llmEnabled: false,
-  llmCooldownSeconds: 20,
-  llmResourceMonitoringEnabled: true,
-  uiViewMode: "comfortable",
-  showSourceIcons: true,
-  glassmorphismOpacity: 30,
-  accentColorSource: "automatic",
-  dynamicBackdropEnabled: true,
-  aiTypewriterEnabled: true,
-  aiTypewriterSpeed: 30,
-  enableHoverPreview: true,
-  hoverPreviewDelay: 500,
-  aiPersonality: "analyst",
-  performanceGuardEnabled: true,
-  ramThresholdMB: 800,
-  articleRetention: 500,
-  allowLlmDuringGaming: false,
-  llmTempCeilingCelsius: 75,
-  llmThermalCooldownBonus: 30,
-  llmAdaptiveTokens: true,
-  llmReducedTokenCount: 80,
-  llmAdaptiveThreads: true,
-  selectedModel: "qwen2.5-0.5b",
-};
+const StatusPill: FC<{ label: string; color: string }> = ({ label, color }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: "5px", padding: "2px 12px 4px", justifyContent: "flex-end" }}>
+    <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: color, display: "inline-block" }} />
+    <span style={{ fontSize: "10px", fontWeight: 600, color }}>{label}</span>
+  </div>
+);
 
 function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBackToNews?: () => void }) {
-  const [articles, setArticles] = useState<NewsArticle[]>([]);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [sourceHealth, setSourceHealth] = useState<SourceHealth>({});
-  const pullDistanceRef = useRef(0);
-  const pullIndicatorRef = useRef<HTMLDivElement>(null);
-  const pullSpinnerRef = useRef<HTMLDivElement>(null);
-  const [pullStage, setPullStage] = useState(0);
-  const [touchStartY, setTouchStartY] = useState(0);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
-  const [fadeIn, setFadeIn] = useState(true);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
-  const backdropImage = null;
+  const feed = useArticleFeed(showSettings);
+  const { visible, page, totalPages, loading, refreshing, sourceHealth, llmStatus, fadeIn, settings, sources,
+    pendingDismiss, activeSource, setActiveSource, newArticleCount,
+    handlePageChange, handleMarkRead, handleMarkUnread, handleDismiss, handleUndoDismiss, handlePrevPage, handleNextPage } = feed;
+  const { pullStage, pullIndicatorRef, pullSpinnerRef, touchHandlers } = usePullToRefresh(refreshing, feed.handleRefresh);
+  const [previewArticle, setPreviewArticle] = useState<NewsArticle | null>(null);
+  const [menuLink, setMenuLink] = useState<string | null>(null);
+  const [command, setCommand] = useState<{ link: string; action: "summarize" } | null>(null);
+  const menuArticle = visible.find(a => a.link === menuLink);
 
-  const pageRef = useRef(page);
-  const totalPagesRef = useRef(totalPages);
-  const loadingRef = useRef(loading);
-  pageRef.current = page;
-  totalPagesRef.current = totalPages;
-  loadingRef.current = loading;
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const savedScroll = useRef(0);
+  const settingsOpen = useRef(false);
+  settingsOpen.current = !!showSettings;
 
-  const loadNews = async (pageNum: number, withTransition: boolean = false) => {
-    // Fade out if transition requested
-    if (withTransition && articles.length > 0) {
-      setFadeIn(false);
-      await new Promise(resolve => setTimeout(resolve, 250)); // Wait 0.25s for fade out
-    }
-
-    setLoading(true);
-    try {
-      const response = await getNews(pageNum, 10);
-      setArticles(response.articles);
-      setPage(response.page);
-      setTotalPages(response.totalPages);
-
-      const health = await getSourceHealth();
-      setSourceHealth(health);
-
-      // Load LLM status
-      const status = await getLLMStatus();
-      setLlmStatus(status);
-
-      // Fade in
-      if (withTransition) {
-        setFadeIn(true);
-      }
-    } catch (error) {
-      console.error("Failed to load news:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadNewsRef = useRef(loadNews);
-  loadNewsRef.current = loadNews;
-
-  const handlePageChange = useCallback((delta: number) => {
-    if (delta < 0 && pageRef.current > 1 && !loadingRef.current) loadNewsRef.current(pageRef.current - 1, true);
-    else if (delta > 0 && pageRef.current < totalPagesRef.current && !loadingRef.current) loadNewsRef.current(pageRef.current + 1, true);
-  }, []);
-
-  const handlePrevPage = useCallback(() => {
-    if (pageRef.current > 1 && !loadingRef.current) loadNewsRef.current(pageRef.current - 1, true);
-  }, []);
-
-  const handleNextPage = useCallback(() => {
-    if (pageRef.current < totalPagesRef.current && !loadingRef.current) loadNewsRef.current(pageRef.current + 1, true);
-  }, []);
-
-  // Load settings
   useEffect(() => {
-    getSettings().then(s => setSettings(s));
+    const sc = findScroller(wrapRef.current);
+    if (!sc) return;
+    const onScroll = () => { if (!settingsOpen.current) savedScroll.current = sc.scrollTop; };
+    sc.addEventListener("scroll", onScroll);
+    return () => sc.removeEventListener("scroll", onScroll);
   }, []);
 
-  // MUST be called before any conditional returns (React Rules of Hooks)
-  useEffect(() => {
-    if (!showSettings) {
-      loadNews(1);
-    }
+  useLayoutEffect(() => {
+    const sc = findScroller(wrapRef.current);
+    if (sc) sc.scrollTop = showSettings ? 0 : savedScroll.current;
   }, [showSettings]);
 
-  useEffect(() => {
-    const input = window.SteamClient?.Input;
-    if (typeof input?.RegisterForControllerStateChanges !== 'function') return;
-    let prevButtons = 0;
-    const reg = input.RegisterForControllerStateChanges(
-      (changes: Array<{ ulButtons: number }>) => {
-        for (const change of changes) {
-          const curr = change.ulButtons;
-          const pressed = curr & ~prevButtons;
-          prevButtons = curr;
-          if ((pressed & 2) && pageRef.current > 1 && !loadingRef.current) {
-            loadNewsRef.current(pageRef.current - 1, true);
-          } else if ((pressed & 1) && pageRef.current < totalPagesRef.current && !loadingRef.current) {
-            loadNewsRef.current(pageRef.current + 1, true);
-          }
-        }
-      }
-    );
-    return () => reg?.unregister();
-  }, []);
-
-  useEffect(() => {
-    const listener = addEventListener<[data: { timestamp: string }]>(
-      "news_refreshed",
-      (data) => setLastRefreshed(data.timestamp)
-    );
-    return () => removeEventListener("news_refreshed", listener);
-  }, []);
-
-  // If showing settings, render Settings component
-  if (showSettings && onBackToNews) {
-    return <SettingsComponent onBack={onBackToNews} />;
-  }
-
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    try {
-      const success = await refreshNews();
-      if (success) {
-        const response = await getNews(page, 10);
-        setArticles(response.articles);
-        setPage(response.page);
-        setTotalPages(response.totalPages);
-
-        const settings = await getSettings();
-        toaster.toast({
-          title: "News Refreshed",
-          body: `Loaded ${response.total} articles from ${settings?.sourcesEnabled?.length || 6} sources`,
-        });
-
-        const health = await getSourceHealth();
-        setSourceHealth(health);
-      }
-    } catch (error) {
-      console.error("Failed to refresh:", error);
-    } finally {
-      setRefreshing(false);
-    }
+  const turnPage = (fn: () => void) => {
+    fn();
+    const sc = findScroller(wrapRef.current);
+    if (sc) sc.scrollTop = 0;
   };
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    setTouchStartY(e.touches[0].clientY);
-    const target = e.currentTarget as HTMLElement;
-    setScrollTop(target.scrollTop || 0);
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (scrollTop > 5) return;
-    const distance = e.touches[0].clientY - touchStartY;
-    if (distance <= 0 || distance >= 120) return;
-    pullDistanceRef.current = distance;
-
-    const ind = pullIndicatorRef.current;
-    if (ind) {
-      ind.style.transform = `translateY(${Math.min(distance * 0.5, 60)}px)`;
-      ind.style.opacity = String(Math.min(distance / 40, 1));
-    }
-    const sp = pullSpinnerRef.current;
-    if (sp) sp.style.transform = `rotate(${(Math.min(Math.round((distance / 80) * 100), 100) / 100) * 360}deg)`;
-
-    const newStage = distance > 10 ? getPullStage(distance) : 0;
-    setPullStage(s => s !== newStage ? newStage : s);
-  };
-
-  const handleTouchEnd = async () => {
-    const dist = pullDistanceRef.current;
-    pullDistanceRef.current = 0;
-    setPullStage(0);
-    if (dist > 80 && !refreshing) handleRefresh();
-  };
-
-  const getPullStage = (distance: number) => {
-    if (distance < 40) return 1;
-    if (distance < 80) return 2;
-    return 3;
-  };
-
-
-  const getPullText = (stage: number, refreshing: boolean) => {
-    if (refreshing) return "Refreshing news...";
-    switch (stage) {
-      case 1: return "Pull down to refresh";
-      case 2: return "Keep pulling...";
-      case 3: return "Release to refresh!";
-      default: return "";
-    }
-  };
-
 
   return (
+    <div ref={wrapRef} onContextMenu={(e) => e.preventDefault()}>
+    {showSettings && onBackToNews && <SettingsComponent onBack={onBackToNews} />}
     <Focusable
-      style={{ position: "relative" }}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
+      style={{ position: "relative", overflow: "hidden", display: showSettings ? "none" : undefined }}
+      {...touchHandlers}
     >
-      {settings?.dynamicBackdropEnabled && (
-        <DynamicBackdrop
-          imageUrl={backdropImage}
-          visible={false}
-        />
-      )}
       {pullStage > 0 && !refreshing && (
         <div
           ref={pullIndicatorRef}
@@ -382,16 +159,37 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
               color: pullStage >= 2 ? "#1a9fff" : "#8b8f98",
             }}
           >
-            {getPullText(pullStage, refreshing)}
+            {pullText(pullStage, refreshing)}
           </div>
         </div>
       )}
 
-      {lastRefreshed && (
-        <div style={{ fontSize: "10px", color: "#8b8f98", textAlign: "right", padding: "2px 12px 0" }}>
-          Last refreshed: {formatRefreshTime(lastRefreshed)}
-        </div>
-      )}
+      <StatusPill
+        label={newArticleCount > 0 ? `${newArticleCount} new` : "Up to date"}
+        color={newArticleCount > 0 ? "#1a9fff" : "#4ade80"}
+      />
+
+      <div style={{ overflowX: "auto", display: "flex", gap: "6px", padding: "0 12px 8px", scrollbarWidth: "none" } as React.CSSProperties}>
+        {["All", ...sources].map(src => (
+          <Focusable
+            key={src}
+            onActivate={() => setActiveSource(src)}
+            onClick={() => setActiveSource(src)}
+            style={{
+              flexShrink: 0,
+              padding: "4px 10px",
+              borderRadius: "12px",
+              fontSize: "11px",
+              fontWeight: 600,
+              background: activeSource === src ? "rgba(26, 159, 255, 0.2)" : "rgba(255,255,255,0.06)",
+              border: `1px solid ${activeSource === src ? "rgba(26, 159, 255, 0.5)" : "rgba(255,255,255,0.1)"}`,
+              color: activeSource === src ? "#1a9fff" : "#8b8f98",
+              transition: "all 0.2s ease",
+              cursor: "pointer",
+            }}
+          >{src}</Focusable>
+        ))}
+      </div>
 
       <PanelSection>
         <div
@@ -400,140 +198,100 @@ function Content({ showSettings, onBackToNews }: { showSettings?: boolean; onBac
             transition: "opacity 0.5s ease-in-out"
           }}
         >
-          {loading && articles.length === 0 ? (
+          {!settings || (loading && feed.articles.length === 0) ? (
             <>
               {Array.from({ length: 10 }).map((_, i) => (
                 <SkeletonArticle key={`skeleton-${i}`} />
               ))}
             </>
-          ) : articles.length === 0 ? (
+          ) : feed.articles.length === 0 ? (
             <PanelSectionRow>
               <div style={{ textAlign: "center", padding: "20px", color: "#8b8f98" }}>
                 No news available - try refreshing
               </div>
             </PanelSectionRow>
           ) : (
-            articles.map((article, idx) => (
+            visible.map((article, idx) => (
               <NewsItem
                 key={article.link}
                 article={article}
                 health={sourceHealth[article.source] || 'ok'}
                 llmEnabled={llmStatus?.enabled ?? false}
                 llmStatus={llmStatus}
-                settings={settings ?? DEFAULT_SETTINGS}
+                settings={settings}
                 index={idx}
                 onPageChange={handlePageChange}
+                onShowMenu={(a) => setMenuLink(a.link)}
+                onDismiss={handleDismiss}
+                onMarkRead={handleMarkRead}
+                command={command}
+                onCommandDone={() => setCommand(null)}
               />
             ))
           )}
         </div>
       </PanelSection>
 
-      {totalPages > 1 && (
-        <PanelSection>
-          <PanelSectionRow>
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "12px",
-                padding: "16px 0",
-                borderTop: "1px solid rgba(255, 255, 255, 0.08)",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "16px",
-                }}
-              >
-                <Focusable
-                  onActivate={handlePrevPage}
-                  onClick={handlePrevPage}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: "40px",
-                    height: "40px",
-                    borderRadius: "50%",
-                    background: page === 1 ? "rgba(255, 255, 255, 0.05)" : "rgba(26, 159, 255, 0.1)",
-                    border: `1px solid ${page === 1 ? "rgba(255, 255, 255, 0.1)" : "rgba(26, 159, 255, 0.3)"}`,
-                    cursor: page === 1 || loading ? "not-allowed" : "pointer",
-                    opacity: page === 1 || loading ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
-                >
-                  <FaChevronLeft style={{ fontSize: "16px", color: page === 1 ? "#8b8f98" : "#1a9fff" }} />
-                </Focusable>
-                <div
-                  style={{
-                    fontSize: "14px",
-                    color: "#ffffff",
-                    fontWeight: 500,
-                    fontVariantNumeric: "tabular-nums",
-                    minWidth: "80px",
-                    textAlign: "center",
-                  }}
-                >
-                  {page} / {totalPages}
-                </div>
-                <Focusable
-                  onActivate={handleNextPage}
-                  onClick={handleNextPage}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: "40px",
-                    height: "40px",
-                    borderRadius: "50%",
-                    background: page === totalPages ? "rgba(255, 255, 255, 0.05)" : "rgba(26, 159, 255, 0.1)",
-                    border: `1px solid ${page === totalPages ? "rgba(255, 255, 255, 0.1)" : "rgba(26, 159, 255, 0.3)"}`,
-                    cursor: page === totalPages || loading ? "not-allowed" : "pointer",
-                    opacity: page === totalPages || loading ? 0.5 : 1,
-                    transition: "all 0.2s ease",
-                  }}
-                >
-                  <FaChevronRight style={{ fontSize: "16px", color: page === totalPages ? "#8b8f98" : "#1a9fff" }} />
-                </Focusable>
-              </div>
-              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
-                  const pageNum = i + 1;
-                  const isPast = pageNum < page;
-                  const isCurrent = pageNum === page;
-                  return (
-                    <div
-                      key={pageNum}
-                      style={{
-                        width: isCurrent ? "10px" : "8px",
-                        height: isCurrent ? "10px" : "8px",
-                        borderRadius: "50%",
-                        background: isCurrent
-                          ? "#1a9fff"
-                          : isPast
-                          ? "rgba(26, 159, 255, 0.6)"
-                          : "rgba(255, 255, 255, 0.2)",
-                        boxShadow: isCurrent ? "0 0 8px rgba(26, 159, 255, 0.6)" : "none",
-                        transition: "all 0.3s ease",
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          </PanelSectionRow>
-        </PanelSection>
+      {pendingDismiss && (
+        <div style={{
+          position: "absolute", bottom: "56px", left: "12px", right: "12px",
+          background: "rgba(27, 40, 56, 0.96)",
+          border: "1px solid rgba(255,255,255,0.15)",
+          borderRadius: "8px", padding: "10px 14px",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          zIndex: 500, animation: "slideUp 0.2s ease-out",
+        }}>
+          <span style={{ fontSize: "12px", color: "#d1d5db" }}>Article removed</span>
+          <Focusable
+            onActivate={handleUndoDismiss}
+            onClick={handleUndoDismiss}
+            style={{ fontSize: "12px", color: "#1a9fff", fontWeight: 600, background: "none", border: "none", cursor: "pointer" }}
+          >Undo</Focusable>
+        </div>
       )}
 
+      {menuArticle && (
+        <ActionMenu
+          title={menuArticle.title}
+          onClose={() => setMenuLink(null)}
+          items={[
+            { label: "Quick peek", run: () => { setPreviewArticle(menuArticle); handleMarkRead(menuArticle.link); } },
+            ...(llmStatus?.enabled && llmStatus?.model_downloaded
+              ? [{ label: "Summarize", run: () => setCommand({ link: menuArticle.link, action: "summarize" }) }]
+              : []),
+            menuArticle.is_read
+              ? { label: "Mark unread", run: () => handleMarkUnread(menuArticle.link) }
+              : { label: "Mark read", run: () => handleMarkRead(menuArticle.link) },
+            { label: "Open in browser", run: () => { handleMarkRead(menuArticle.link); openInBrowser(menuArticle.link); } },
+            { label: "Dismiss", run: () => handleDismiss(menuArticle.link) },
+          ]}
+        />
+      )}
+
+      {previewArticle && (
+        <QuickPeekCard
+          article={previewArticle}
+          onClose={() => setPreviewArticle(null)}
+        />
+      )}
     </Focusable>
+    {!showSettings && (
+      <NavFooter
+        items={[
+          ...(totalPages > 1 ? [
+            { label: "‹", onActivate: () => turnPage(handlePrevPage), disabled: page === 1 || loading },
+            { label: `${page} / ${totalPages}`, grow: 1.4 },
+            { label: "›", onActivate: () => turnPage(handleNextPage), disabled: page === totalPages || loading },
+          ] : []),
+          { label: <FaSync style={{ fontSize: "12px" }} />, onActivate: feed.handleRefresh, disabled: refreshing },
+          { label: <FaCog style={{ fontSize: "12px" }} />, onActivate: () => setShowSettingsGlobal?.(true) },
+        ]}
+      />
+    )}
+    </div>
   );
 }
 
-// State management for settings toggle
 let setShowSettingsGlobal: ((show: boolean) => void) | null = null;
 
 class ErrorBoundary extends Component<{ children: any }, { hasError: boolean }> {
@@ -552,7 +310,8 @@ class ErrorBoundary extends Component<{ children: any }, { hasError: boolean }> 
 function MainContent() {
   const [showSettings, setShowSettings] = useState(false);
 
-  // Expose setter globally for title bar access
+  useEffect(() => { injectGlobalAnimations(); }, []);
+
   useEffect(() => {
     setShowSettingsGlobal = setShowSettings;
     return () => { setShowSettingsGlobal = null; };
@@ -595,19 +354,10 @@ const ColoredNewsIcon: FC = () => {
   );
 };
 
-const handleRefresh = async () => {
-  await refreshNews();
-  toaster.toast({ title: "Refreshing", body: "Fetching latest news..." });
-};
-
 export default definePlugin(() => {
-  console.log("DeckyNews initializing");
-
   const newsRefreshListener = addEventListener<[data: { timestamp: string }]>(
     "news_refreshed",
-    (data) => {
-      console.log("News refreshed at:", data.timestamp);
-    }
+    () => {}
   );
 
   return {
@@ -618,40 +368,11 @@ export default definePlugin(() => {
           <ColoredNewsIcon />
           <span>Decky News</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <Focusable
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: "32px",
-              height: "32px",
-              borderRadius: "6px",
-              background: "rgba(255, 255, 255, 0.05)",
-              border: "1px solid rgba(255, 255, 255, 0.1)",
-              color: "#8b8f98",
-              transition: "all 0.2s ease",
-              cursor: "pointer",
-            }}
-            onActivate={handleRefresh}
-            onClick={handleRefresh}
-          >
-            <FaSync style={{ fontSize: "14px" }} />
-          </Focusable>
-          <Focusable
-            style={{ display: "flex", alignItems: "center", padding: "4px", cursor: "pointer" }}
-            onActivate={() => setShowSettingsGlobal?.(true)}
-            onClick={() => setShowSettingsGlobal?.(true)}
-          >
-            <FaCog style={{ fontSize: "16px", color: "#8b8f98" }} />
-          </Focusable>
-        </div>
       </div>
     ),
     content: <MainContent />,
     icon: <ColoredNewsIcon />,
     onDismount() {
-      console.log("DeckyNews unloading");
       removeEventListener("news_refreshed", newsRefreshListener);
       setShowSettingsGlobal = null;
     },

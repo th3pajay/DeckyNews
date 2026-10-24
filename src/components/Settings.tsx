@@ -12,6 +12,7 @@ import { toaster } from "@decky/api";
 import { FaTrash, FaDownload } from "react-icons/fa";
 import {
   getSettings,
+  getSources,
   updateSettings,
   getLLMStatus,
   downloadLLMModel,
@@ -20,28 +21,26 @@ import {
 } from "../api";
 import { Settings as SettingsType, LLMStatus, DownloadResponse } from "../types";
 import { TelemetrySummaryStrip, ForensicHeatmap } from "./Telemetry";
+import { NavFooter } from "./NavFooter";
 
-// Suppress unused import warning — used as type reference
 void ({} as DownloadResponse);
 
-export function Settings(_props: { onBack?: () => void }) {
+export function Settings({ onBack }: { onBack?: () => void }) {
   const [settings, setSettings] = useState<SettingsType | null>(null);
+  const [sources, setSources] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
   const [downloadingModel, setDownloadingModel] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [selectedPage, setSelectedPage] = useState(0);
-  const [menuOpen, setMenuOpen] = useState(false);
 
-  // Named color constants
   const STATUS_GREEN = "#4ade80";
   const STATUS_YELLOW = "#ffc82c";
   const STATUS_RED = "#d93936";
   const COLOR_MUTED = "#8b8f98";
   const COLOR_ACCENT = "#1a9fff";
 
-  // Debounce helper for slider inputs
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const debouncedUpdateSetting = (key: keyof SettingsType, value: any) => {
     if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
@@ -52,7 +51,6 @@ export function Settings(_props: { onBack?: () => void }) {
     Promise.all([loadSettings(), loadLLMStatus()]);
   }, []);
 
-  // Poll backend for download_progress while a download is in flight
   useEffect(() => {
     if (!downloadingModel) return;
     const id = setInterval(async () => {
@@ -69,6 +67,7 @@ export function Settings(_props: { onBack?: () => void }) {
     try {
       const loadedSettings = await getSettings();
       setSettings(loadedSettings);
+      setSources(await getSources());
     } catch (error) {
       console.error("Failed to load settings:", error);
     }
@@ -136,34 +135,48 @@ export function Settings(_props: { onBack?: () => void }) {
     );
   }
 
-  const sources = ["IGN", "PCGamer", "Steam", "Kotaku", "GameSpot", "Polygon"];
-  const PAGE_TITLES = ["Sources", "Feed", "AI", "AI Perf", "Display", "Advanced"];
+  const PAGE_META = [
+    { icon: "📡", color: COLOR_ACCENT,   title: "Sources"  },
+    { icon: "📰", color: "#a78bfa",      title: "Feed"     },
+    { icon: "🤖", color: STATUS_YELLOW,  title: "AI"       },
+    { icon: "⚡", color: "#ff6b6b",      title: "AI Perf"  },
+    { icon: "🎨", color: "#c084fc",      title: "Display"  },
+    { icon: "🔧", color: COLOR_MUTED,    title: "Advanced" },
+  ];
+
+  const goBack = () => (showHeatmap ? setShowHeatmap(false) : onBack?.());
 
   return (
-    <div>
+    <Focusable onCancelButton={goBack}>
       <PanelSection>
         <PanelSectionRow>
-          <Focusable
-            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", padding: "2px 0" }}
-            onActivate={() => setMenuOpen(!menuOpen)}
-          >
-            <span style={{ fontWeight: 600, fontSize: "13px" }}>{PAGE_TITLES[selectedPage]}</span>
-            <span style={{ color: "#8b8f98", fontSize: "12px" }}>{menuOpen ? "▲" : "▼"}</span>
-          </Focusable>
+          <div style={{ overflowX: "auto", display: "flex", gap: "4px", scrollbarWidth: "none" } as React.CSSProperties}>
+            {PAGE_META.map((meta, i) => (
+              <Focusable
+                key={i}
+                onActivate={() => setSelectedPage(i)}
+                onClick={() => setSelectedPage(i)}
+                style={{
+                  flexShrink: 0, padding: "3px 8px", borderRadius: "8px",
+                  fontSize: "10px", fontWeight: 600,
+                  background: selectedPage === i ? `${meta.color}22` : "transparent",
+                  border: `1px solid ${selectedPage === i ? meta.color : "transparent"}`,
+                  color: selectedPage === i ? meta.color : COLOR_MUTED,
+                  transition: "all 0.2s ease", cursor: "pointer",
+                }}
+              >{meta.icon} {meta.title}</Focusable>
+            ))}
+          </div>
         </PanelSectionRow>
-        {menuOpen && PAGE_TITLES.map((title, i) => (
-          <PanelSectionRow key={title}>
-            <Focusable
-              style={{ cursor: "pointer", padding: "4px 0", fontWeight: i === selectedPage ? 600 : 400, color: i === selectedPage ? "#1a9fff" : "inherit", fontSize: "13px" }}
-              onActivate={() => { setSelectedPage(i); setMenuOpen(false); }}
-            >
-              {title}
-            </Focusable>
-          </PanelSectionRow>
-        ))}
       </PanelSection>
       {selectedPage === 0 && (
-              <PanelSection title="News Sources">
+              <PanelSection>
+                <PanelSectionRow>
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[0].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[0].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[0].title}</span>
+                  </div>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <div style={{ fontSize: "12px", color: "#8b8f98", marginBottom: "8px" }}>
                     Select which gaming news sources to display
@@ -182,7 +195,13 @@ export function Settings(_props: { onBack?: () => void }) {
               </PanelSection>
             )}
       {selectedPage === 1 && (
-              <PanelSection title="Feed">
+              <PanelSection>
+                <PanelSectionRow>
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[1].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[1].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[1].title}</span>
+                  </div>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <SliderField
                     label="Refresh Interval"
@@ -213,7 +232,13 @@ export function Settings(_props: { onBack?: () => void }) {
               </PanelSection>
             )}
       {selectedPage === 2 && (
-              <PanelSection title="AI Summaries">
+              <PanelSection>
+                <PanelSectionRow>
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[2].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[2].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[2].title}</span>
+                  </div>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <div style={{ fontSize: "12px", color: "#8b8f98", marginBottom: "8px" }}>
                     Generate AI-powered article summaries on your Steam Deck
@@ -277,9 +302,9 @@ export function Settings(_props: { onBack?: () => void }) {
                     description="Select which model to use for summaries"
                     rgOptions={[
                       { data: "qwen2.5-0.5b", label: "Qwen2.5-0.5B (Default, 352MB)" },
-                      { data: "mobilellm-600m", label: "MobileLLM-600M ⚠ Experimental (430MB)" },
-                      { data: "llama3.2-1b", label: "Llama 3.2-1B (700MB)" },
-                      { data: "qwen3-0.6b-thinking", label: "Qwen3-0.6B Thinking (~400MB)" },
+                      { data: "qwen3-0.6b", label: "Qwen3-0.6B (397MB)" },
+                      { data: "smollm2-360m", label: "SmolLM2-360M (220MB)" },
+                      { data: "gemma3-270m", label: "Gemma 3 270M (253MB)" },
                     ]}
                     selectedOption={settings?.selectedModel ?? "qwen2.5-0.5b"}
                     onChange={async (option: SingleDropdownOption) => {
@@ -288,14 +313,6 @@ export function Settings(_props: { onBack?: () => void }) {
                     }}
                   />
                 </PanelSectionRow>
-
-                {(settings?.selectedModel === "mobilellm-600m") && (
-                  <PanelSectionRow>
-                    <div style={{ padding: "8px 10px", background: "rgba(255, 180, 0, 0.1)", borderRadius: "6px", fontSize: "11px", color: "#ffb400", lineHeight: "1.4" }}>
-                      <strong>Experimental model</strong> — MobileLLM-600M is a base model without instruction tuning. Summary quality will be lower and less consistent than Qwen2.5-0.5B.
-                    </div>
-                  </PanelSectionRow>
-                )}
 
                 <PanelSectionRow>
                   <DropdownItem
@@ -481,7 +498,13 @@ export function Settings(_props: { onBack?: () => void }) {
               </PanelSection>
             )}
       {selectedPage === 3 && (!settings.llmEnabled ? (
-              <PanelSection title="AI Performance">
+              <PanelSection>
+                <PanelSectionRow>
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[3].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[3].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[3].title}</span>
+                  </div>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <div style={{ fontSize: "12px", color: "#8b8f98", padding: "8px 0" }}>
                     Enable AI Summaries first to configure performance settings.
@@ -591,18 +614,12 @@ export function Settings(_props: { onBack?: () => void }) {
               </>
             ))}
       {selectedPage === 4 && (
-              <PanelSection title="Display & Interaction">
+              <PanelSection>
                 <PanelSectionRow>
-                  <DropdownItem
-                    label="View Mode"
-                    rgOptions={[
-                      { data: "compact", label: "Compact" },
-                      { data: "comfortable", label: "Comfortable (Default)" },
-                      { data: "magazine", label: "Magazine" }
-                    ]}
-                    selectedOption={settings?.uiViewMode ?? "comfortable"}
-                    onChange={(option: SingleDropdownOption) => updateSetting("uiViewMode", option.data)}
-                  />
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[4].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[4].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[4].title}</span>
+                  </div>
                 </PanelSectionRow>
                 <PanelSectionRow>
                   <ToggleField
@@ -610,34 +627,6 @@ export function Settings(_props: { onBack?: () => void }) {
                     description="Display favicons next to source names"
                     checked={settings?.showSourceIcons ?? true}
                     onChange={(value) => updateSetting("showSourceIcons", value)}
-                  />
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <SliderField
-                    label="Glass Effect Intensity"
-                    value={settings?.glassmorphismOpacity ?? 30}
-                    min={0}
-                    max={100}
-                    step={10}
-                    onChange={(value) => debouncedUpdateSetting("glassmorphismOpacity", value)}
-                    bottomSeparator="none"
-                    description="Card background blur (higher = more blur)"
-                  />
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <ToggleField
-                    label="Automatic Accent Colors"
-                    description="Extract colors from source logos"
-                    checked={settings?.accentColorSource === "automatic"}
-                    onChange={(value) => updateSetting("accentColorSource", value ? "automatic" : "default")}
-                  />
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <ToggleField
-                    label="Dynamic Backdrops"
-                    description="Show blurred image on focused articles"
-                    checked={settings?.dynamicBackdropEnabled ?? true}
-                    onChange={(value) => updateSetting("dynamicBackdropEnabled", value)}
                   />
                 </PanelSectionRow>
                 <PanelSectionRow>
@@ -663,31 +652,27 @@ export function Settings(_props: { onBack?: () => void }) {
                   </PanelSectionRow>
                 )}
                 <PanelSectionRow>
-                  <ToggleField
-                    label="Long-Press Preview"
-                    description="Hold article to show quick preview"
-                    checked={settings?.enableHoverPreview ?? true}
-                    onChange={(value) => updateSetting("enableHoverPreview", value)}
+                  <SliderField
+                    label="Long-Press Delay"
+                    value={settings?.hoverPreviewDelay ?? 700}
+                    min={200}
+                    max={1000}
+                    step={100}
+                    onChange={(value) => debouncedUpdateSetting("hoverPreviewDelay", value)}
+                    bottomSeparator="none"
+                    description={`${settings?.hoverPreviewDelay ?? 700}ms hold opens the article menu (X button also works)`}
                   />
                 </PanelSectionRow>
-                {settings?.enableHoverPreview && (
-                  <PanelSectionRow>
-                    <SliderField
-                      label="Preview Delay"
-                      value={settings?.hoverPreviewDelay ?? 500}
-                      min={200}
-                      max={1000}
-                      step={100}
-                      onChange={(value) => debouncedUpdateSetting("hoverPreviewDelay", value)}
-                      bottomSeparator="none"
-                      description={`${settings?.hoverPreviewDelay ?? 500}ms hold time`}
-                    />
-                  </PanelSectionRow>
-                )}
               </PanelSection>
             )}
       {selectedPage === 5 && (
-              <PanelSection title="Advanced">
+              <PanelSection>
+                <PanelSectionRow>
+                  <div style={{ borderLeft: `3px solid ${PAGE_META[5].color}`, paddingLeft: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "14px" }}>{PAGE_META[5].icon}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 700, color: "#ffffff" }}>{PAGE_META[5].title}</span>
+                  </div>
+                </PanelSectionRow>
                 <PanelSectionRow>
                   <TelemetrySummaryStrip />
                 </PanelSectionRow>
@@ -729,6 +714,12 @@ export function Settings(_props: { onBack?: () => void }) {
           onClose={() => setShowHeatmap(false)}
         />
       )}
-    </div>
+      <NavFooter
+        items={[
+          { label: "‹ Back", onActivate: goBack, accent: true },
+          { label: "⌂ Home", onActivate: () => onBack?.() },
+        ]}
+      />
+    </Focusable>
   );
 }

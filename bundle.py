@@ -1,38 +1,25 @@
 #!/usr/bin/env python3
-"""
-DeckyNews Bundle Script - Cross-platform plugin bundler for Steam Deck
-
-Creates a properly formatted ZIP file that works on Steam Deck:
-- Uses forward slashes in ZIP paths (per ZIP spec)
-- Downloads Linux-compatible Python wheels
-- Validates bundle structure
-
-Usage:
-    python bundle.py           # Standard build
-    python bundle.py --clean   # Clean build directories only
-    python bundle.py --skip-deps  # Skip Python dependency bundling
-"""
 
 import os
 import sys
-import json
 import shutil
 import zipfile
 import tarfile
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-# Configuration
+
 PLUGIN_NAME = "DeckyNews"
+
+LOADER_PYTHONS = ["314"]
 BUILD_DIR = Path("build")
-DIST_DIR = Path("dist")
 BUNDLE_DIR = BUILD_DIR / PLUGIN_NAME
 PY_MODULES_DIR = BUNDLE_DIR / "py_modules"
 ZIP_NAME = f"{PLUGIN_NAME}.zip"
 
-# Files to include in bundle
+
 PLUGIN_FILES = [
     "main.py",
     "plugin.json",
@@ -41,69 +28,35 @@ PLUGIN_FILES = [
     "README.md",
 ]
 
-# Directories to copy
+
 PLUGIN_DIRS = [
     ("dist", "dist"),
     ("assets", "assets"),
     ("defaults", "defaults"),
     ("bin", "bin"),
     ("src", "src"),
-    ("py_modules", "py_modules"),  # Copy manually verified py_modules
 ]
-
-# Core dependencies (always bundled)
-CORE_DEPENDENCIES = [
-    "aiohttp",
-    "feedparser",
-    "certifi",
-    "multidict",
-    "yarl",
-    "frozenlist",
-    "aiosignal",
-    "async-timeout",
-    "attrs",
-    "idna",
-    "sgmllib3k",
-    "Levenshtein",  # For article deduplication
-]
-
-# LLM dependencies (optional, larger)
-LLM_DEPENDENCIES = [
-    "cloudscraper",
-    "trafilatura",
-    "huggingface_hub",
-    "psutil",
-    # llama-cpp-python requires special handling
-]
-
-# Pre-downloaded wheels directory (for huggingface_hub and deps)
-PREDOWNLOADED_WHEELS_DIR = Path("temp_wheels")
 
 
 def print_step(step: int, total: int, message: str):
-    """Print a formatted step message."""
     print(f"\n[{step}/{total}] {message}")
 
 
 def print_ok(message: str):
-    """Print success message."""
     print(f"  [OK] {message}")
 
 
 def print_warn(message: str):
-    """Print warning message."""
     print(f"  [WARN] {message}")
 
 
 def print_error(message: str):
-    """Print error message."""
     print(f"  [ERROR] {message}")
 
 
 def run_command(cmd: List[str], check: bool = True) -> Tuple[bool, str]:
-    """Run a command and return success status and output."""
     try:
-        # On Windows, use shell=True to find commands in PATH
+
         use_shell = sys.platform == "win32"
         result = subprocess.run(
             cmd,
@@ -120,7 +73,6 @@ def run_command(cmd: List[str], check: bool = True) -> Tuple[bool, str]:
 
 
 def clean_build():
-    """Remove build directories."""
     print("Cleaning build directories...")
 
     if BUILD_DIR.exists():
@@ -133,16 +85,15 @@ def clean_build():
 
 
 def build_frontend() -> bool:
-    """Build the frontend with pnpm or npm."""
     print_step(2, 7, "Building frontend with Rollup...")
 
-    # Try pnpm first
+
     success, output = run_command(["pnpm", "run", "build"], check=False)
     if success:
         print_ok("Frontend built with pnpm")
         return True
 
-    # Fall back to npm
+
     print_warn("pnpm not found, trying npm...")
     success, output = run_command(["npm", "run", "build"], check=False)
     if success:
@@ -155,13 +106,12 @@ def build_frontend() -> bool:
 
 
 def copy_plugin_files() -> bool:
-    """Copy plugin files to bundle directory."""
     print_step(3, 7, "Copying plugin files...")
 
-    # Create bundle directory
+
     BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Copy individual files
+
     for file_name in PLUGIN_FILES:
         src = Path(file_name)
         if src.exists():
@@ -173,13 +123,13 @@ def copy_plugin_files() -> bool:
                 return False
             print_warn(f"Optional file missing: {file_name}")
 
-    # Copy directories
+
     for src_name, dst_name in PLUGIN_DIRS:
         src = Path(src_name)
         dst = BUNDLE_DIR / dst_name
         if src.exists():
-            # src/ contains both Python backend files AND TypeScript source files.
-            # Only the Python files belong in the bundle; TS files are compiled to dist/.
+
+
             ignore = shutil.ignore_patterns('*.ts', '*.tsx', 'components') if src_name == "src" else None
             shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
             print_ok(f"Copied {src_name}/ -> {dst_name}/")
@@ -209,7 +159,7 @@ def copy_plugin_files() -> bool:
                 if removed_count > 0:
                     print_ok(f"Removed {removed_count} Intel-specific CPU libraries (AMD Zen 2 incompatible)")
 
-                # Verify AMD-compatible libraries remain
+
                 amd_libs = ["libggml-cpu-zen4.so", "libggml-cpu-x64.so", "libggml-cpu-piledriver.so"]
                 kept_count = sum(1 for lib in amd_libs if (dst / lib).exists())
                 if kept_count > 0:
@@ -224,30 +174,26 @@ def copy_plugin_files() -> bool:
 
 
 def install_python_deps(skip_llm: bool = False) -> bool:
-    """Install Python dependencies for Linux/Steam Deck.
-
-    Downloads ALL dependencies in a single pip download command to ensure
-    proper transitive dependency resolution.
-    """
     print_step(4, 7, "Bundling Python dependencies for Linux...")
 
-    # Create py_modules directory
+
     PY_MODULES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ALL dependencies - combining pure Python and binary packages
-    # CRITICAL: All deps must be downloaded in ONE pip invocation for correct transitive resolution
-    # NOTE: Include ALL transitive dependencies explicitly to avoid pip download issues
-    # C extensions: must be Linux x86_64 binary wheels.
-    # Use --no-deps because their Python-package deps are all in pure_python_deps.
+
     c_extension_deps = [
         "lxml",
         "psutil",
         "Levenshtein",
-        "rapidfuzz",   # required by Levenshtein >= 0.21
+        "rapidfuzz",
+        "aiohttp",
+        "multidict",
+        "yarl",
+        "frozenlist",
+        "propcache",
+        "charset-normalizer",
     ]
 
-    # Pure Python packages: no platform constraints needed; pip3-none-any wheels
-    # run on any platform including Steam Deck.
+
     pure_python_deps = [
         "feedparser",
         "sgmllib3k",
@@ -262,27 +208,30 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         "requests",
         "requests_toolbelt",
         "pyparsing",
-        "charset-normalizer",
         "urllib3",
+        "aiosignal",
+        "aiohappyeyeballs",
+        "typing_extensions",
     ]
 
-    print("  Downloading C-extension wheels (Linux x86_64)...")
-    cmd_binary = [
-        sys.executable, "-m", "pip", "download",
-        "--dest", str(PY_MODULES_DIR),
-        "--platform", "manylinux_2_17_x86_64",
-        "--platform", "manylinux_2_28_x86_64",
-        "--platform", "manylinux2014_x86_64",
-        "--python-version", "311",
-        "--only-binary", ":all:",
-        "--no-deps",
-    ] + c_extension_deps
+    print(f"  Downloading C-extension wheels (Linux x86_64, cp{', cp'.join(LOADER_PYTHONS)})...")
+    for pyver in LOADER_PYTHONS:
+        cmd_binary = [
+            sys.executable, "-m", "pip", "download",
+            "--dest", str(PY_MODULES_DIR),
+            "--platform", "manylinux_2_17_x86_64",
+            "--platform", "manylinux_2_28_x86_64",
+            "--platform", "manylinux2014_x86_64",
+            "--python-version", pyver,
+            "--only-binary", ":all:",
+            "--no-deps",
+        ] + c_extension_deps
 
-    success, output = run_command(cmd_binary, check=False)
-    if not success:
-        print_error("Failed to download Linux x86_64 C-extension wheels.")
-        print_error(f"pip output:\n{output[-2000:]}")
-        return False
+        success, output = run_command(cmd_binary, check=False)
+        if not success:
+            print_error(f"Failed to download Linux x86_64 C-extension wheels for cp{pyver}.")
+            print_error(f"pip output:\n{output[-2000:]}")
+            return False
 
     print("  Downloading pure-Python packages...")
     cmd_pure = [
@@ -296,11 +245,11 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         print_error(f"pip output:\n{output[-2000:]}")
         return False
 
-    # List what was downloaded
+
     downloaded_files = list(PY_MODULES_DIR.glob("*"))
     print_ok(f"Downloaded {len(downloaded_files)} files (packages + transitive dependencies)")
 
-    # Verify critical packages AND their transitive dependencies
+
     print("  Verifying critical packages and transitive dependencies...")
     critical_checks = {
         "feedparser": "feedparser",
@@ -311,6 +260,7 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         "chardet": "chardet",
         "certifi": "certifi",
         "psutil": "psutil",
+        "aiohttp": "aiohttp",
         "cloudscraper": "cloudscraper",
         "readability": "readability",
     }
@@ -329,16 +279,8 @@ def install_python_deps(skip_llm: bool = False) -> bool:
 
     print_ok(f"Verified {len(critical_checks)} critical packages (including transitive dependencies)")
 
-    # Copy pre-downloaded wheels (huggingface_hub and dependencies)
-    if PREDOWNLOADED_WHEELS_DIR.exists():
-        print("  Bundling pre-downloaded huggingface_hub wheels...")
-        for wheel in PREDOWNLOADED_WHEELS_DIR.glob("*.whl"):
-            shutil.copy2(wheel, PY_MODULES_DIR / wheel.name)
-            print_ok(f"Copied {wheel.name}")
-    else:
-        print_warn("Pre-downloaded wheels directory not found (temp_wheels/)")
 
-    # Extract all wheel files
+
     extracted_count = 0
     for wheel in PY_MODULES_DIR.glob("*.whl"):
         try:
@@ -349,17 +291,16 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         except Exception as e:
             print_warn(f"Failed to extract {wheel.name}: {e}")
 
-    # Extract tar.gz source distributions (for packages without wheels)
+
     for tarball in PY_MODULES_DIR.glob("*.tar.gz"):
         try:
             with tarfile.open(tarball, 'r:gz') as tar:
-                # Find the package directory inside the tarball
+
                 members = tar.getmembers()
-                pkg_root = members[0].name.split('/')[0] if members else None
                 for member in members:
-                    # Extract only Python files to py_modules directly
+
                     if member.name.endswith('.py'):
-                        # Strip the package-version prefix
+
                         parts = member.name.split('/', 1)
                         if len(parts) > 1:
                             member.name = parts[1]
@@ -373,15 +314,15 @@ def install_python_deps(skip_llm: bool = False) -> bool:
     if extracted_count > 0:
         print_ok(f"Extracted {extracted_count} wheel files")
 
-    # Clean up unnecessary files (keep .dist-info for package metadata)
-    for pattern in ["__pycache__", "*.pyc"]:
+
+    for pattern in ["__pycache__", "*.pyc", "*.pyd"]:
         for item in PY_MODULES_DIR.rglob(pattern):
             if item.is_dir():
                 shutil.rmtree(item)
             else:
                 item.unlink()
 
-    # Verify core dependencies exist
+
     core_present = []
     for dep in ["feedparser", "certifi"]:
         if (PY_MODULES_DIR / dep).exists() or list(PY_MODULES_DIR.glob(f"{dep}*")):
@@ -392,11 +333,10 @@ def install_python_deps(skip_llm: bool = False) -> bool:
         return True
     else:
         print_warn("Some core dependencies may be missing. Bundle may need to install on device.")
-        return True  # Don't fail, as Steam Deck may have these installed
+        return True
 
 
 def create_zip_bundle() -> bool:
-    """Create ZIP file with proper forward slashes."""
     print_step(6, 7, "Creating plugin bundle...")
 
     if Path(ZIP_NAME).exists():
@@ -407,29 +347,28 @@ def create_zip_bundle() -> bool:
 
     with zipfile.ZipFile(ZIP_NAME, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for root, dirs, files in os.walk(BUNDLE_DIR):
-            # Skip __pycache__ directories
+
             dirs[:] = [d for d in dirs if d != "__pycache__"]
 
             for file in files:
-                # Skip .pyc files
+
                 if file.endswith('.pyc'):
                     continue
 
                 file_path = Path(root) / file
 
-                # Calculate archive name with forward slashes
-                # Must be relative to BUILD_DIR, not BUNDLE_DIR
+
                 arcname = file_path.relative_to(BUILD_DIR).as_posix()
 
-                # Use ZipInfo to preserve executable permissions for binaries
+
                 info = zipfile.ZipInfo(arcname)
                 info.compress_type = zipfile.ZIP_DEFLATED
 
-                # Set Unix permissions: rwxr-xr-x (755) for bin/, rw-r--r-- (644) otherwise
+
                 if '/bin/' in arcname or arcname.endswith('/bin'):
-                    info.external_attr = (0o755 << 16) | 0x8000  # rwxr-xr-x + regular file
+                    info.external_attr = (0o755 << 16) | 0x8000
                 else:
-                    info.external_attr = (0o644 << 16) | 0x8000  # rw-r--r-- + regular file
+                    info.external_attr = (0o644 << 16) | 0x8000
 
                 with open(file_path, 'rb') as f:
                     zf.writestr(info, f.read())
@@ -442,7 +381,6 @@ def create_zip_bundle() -> bool:
 
 
 def validate_bundle() -> bool:
-    """Validate the bundle structure."""
     print_step(7, 7, "Validating bundle...")
 
     if not Path(ZIP_NAME).exists():
@@ -454,7 +392,7 @@ def validate_bundle() -> bool:
     with zipfile.ZipFile(ZIP_NAME, 'r') as zf:
         names = zf.namelist()
 
-        # Check required files exist
+
         required = [
             f"{PLUGIN_NAME}/main.py",
             f"{PLUGIN_NAME}/plugin.json",
@@ -466,13 +404,13 @@ def validate_bundle() -> bool:
             print_error(f"Missing required files in bundle: {missing}")
             return False
 
-        # Check for backslashes (would break on Linux)
+
         backslash_paths = [n for n in names if '\\' in n]
         if backslash_paths:
             print_error(f"Bundle contains backslashes (incompatible): {backslash_paths[:3]}")
             return False
 
-        # Check for LLM binaries (optional)
+
         llamafile_binary = f"{PLUGIN_NAME}/bin/llamafile"
         legacy_binary = f"{PLUGIN_NAME}/bin/llama-cli"
 
@@ -482,12 +420,9 @@ def validate_bundle() -> bool:
             print_warn("No AI binaries found - AI summarization unavailable")
 
         print_ok(f"Bundle validated: {len(names)} entries, {zip_size:,} bytes")
+        max_size_mb = 20
 
-        # Check bundle size (excluding llamafile binary)
-        size_mb = zip_size / (1024 * 1024)
-        max_size_mb = 20  # Target: <20MB excluding llamafile
 
-        # Calculate size without llamafile
         size_without_llamafile = zip_size
         for name in names:
             if 'llamafile' in name and name.endswith(('llamafile', 'llamafile-0.9.3')):
@@ -507,7 +442,7 @@ def validate_bundle() -> bool:
         else:
             print_ok(f"Bundle size OK: {size_without_llamafile_mb:.1f}MB (excluding llamafile)")
 
-        # Show structure summary
+
         print("\n  Bundle structure:")
         dirs = set()
         for name in names:
@@ -523,7 +458,6 @@ def validate_bundle() -> bool:
 
 
 def print_instructions():
-    """Print installation instructions."""
     print("\n" + "=" * 50)
     print("BUILD SUCCESSFUL")
     print("=" * 50)
@@ -557,20 +491,20 @@ def main():
         print("\nClean complete.")
         return 0
 
-    # Clean previous builds
+
     print_step(1, 7, "Cleaning previous builds...")
     clean_build()
     print_ok("Clean complete")
 
-    # Build frontend
+
     if not build_frontend():
         return 1
 
-    # Copy plugin files
+
     if not copy_plugin_files():
         return 1
 
-    # Bundle Python dependencies
+
     if not args.skip_deps:
         if not install_python_deps(skip_llm=args.skip_llm):
             print_warn("Dependency installation had errors, but continuing with existing py_modules/")
@@ -578,19 +512,19 @@ def main():
         print_step(4, 7, "Skipping Python dependencies (--skip-deps)")
         PY_MODULES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Ensure compatibility
+
     print_step(5, 7, "Ensuring compatibility...")
     print_ok("Using Python zipfile (ensures Unix-compatible paths)")
 
-    # Create ZIP bundle
+
     if not create_zip_bundle():
         return 1
 
-    # Validate bundle
+
     if not validate_bundle():
         return 1
 
-    # Cleanup build directory
+
     print("\nCleaning up temporary files...")
     if BUILD_DIR.exists():
         shutil.rmtree(BUILD_DIR)

@@ -1,42 +1,14 @@
-import { useState, useEffect, useRef, useCallback, memo, FC } from "react";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
 import { PanelSectionRow, Focusable, GamepadButton, GamepadEvent } from "@decky/ui";
-import { toaster } from "@decky/api";
 import { FaExclamationTriangle } from "react-icons/fa";
-import { summarizeArticle, getCoverageSparkline } from "../api";
-import {
-  NewsArticle,
-  LLMStatus,
-  SummarizeResponse,
-  SparklineData,
-  Settings,
-  QuickPeekCardProps,
-} from "../types";
-import { extractDominantColor, formatRelativeTime } from "../utils";
+import { toaster } from "@decky/api";
+import { summarizeArticle } from "../api";
+import { NewsArticle, LLMStatus, Settings, SummarizeResponse } from "../types";
+import { formatRelativeTime, openInBrowser } from "../utils";
+import { SparklineChart } from "./SparklineChart";
+import { TypewriterText } from "./TypewriterText";
 
-// Suppress unused import warnings — these are used as type references
-void ({} as SummarizeResponse);
-void ({} as SparklineData);
-
-interface TypewriterTextProps {
-  text: string;
-  speed: number;
-  enabled: boolean;
-}
-
-interface SparklineChartProps {
-  similarityHash: string | null;
-}
-
-interface ArticleCardProps {
-  article: NewsArticle;
-  health: string;
-  viewMode: "compact" | "comfortable" | "magazine";
-  isHeroItem: boolean;
-  glassmorphismOpacity: number;
-  showSourceIcon: boolean;
-  accentColor: string;
-  children?: React.ReactNode;
-}
+const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
 
 interface NewsItemProps {
   article: NewsArticle;
@@ -46,610 +18,107 @@ interface NewsItemProps {
   settings: Settings;
   index: number;
   onPageChange: (delta: number) => void;
+  onShowMenu?: (article: NewsArticle) => void;
+  onDismiss?: (link: string) => void;
+  onMarkRead?: (link: string) => void;
+  command?: { link: string; action: "summarize" } | null;
+  onCommandDone?: () => void;
 }
 
-const TypewriterText: FC<TypewriterTextProps> = ({ text, speed, enabled }) => {
-  // Use CSS animation for GPU acceleration (no React re-renders)
-  if (!enabled) {
-    return (
-      <div style={{ fontSize: "13px", lineHeight: "1.5", color: "#b8bcbf" }}>
-        {text}
-      </div>
-    );
-  }
-
-  // Calculate animation duration based on speed (chars/sec)
-  const durationSeconds = text.length / speed;
-
-  // Use CSS animation with max-width + ch units for character-by-character reveal
-  // This animates the width of a wrapper, which is GPU-accelerated and doesn't require React state
-  const containerStyle: React.CSSProperties = {
-    fontSize: "13px",
-    lineHeight: "1.5",
-    color: "#b8bcbf",
-    position: "relative" as const,
-    display: "inline-block",
-  };
-
-  const typewriterStyle: React.CSSProperties = {
-    display: "inline-block",
-    overflow: "hidden",
-    whiteSpace: "nowrap",
-    maxWidth: 0,
-    animation: `typewriter-reveal ${durationSeconds}s steps(${text.length}, end) forwards`,
-    verticalAlign: "top",
-  };
-
-  const cursorStyle: React.CSSProperties = {
-    opacity: 0.6,
-    animation: "blink 1s step-end infinite",
-    marginLeft: "2px",
-  };
-
-  return (
-    <>
-      <style>{`
-        @keyframes typewriter-reveal {
-          from { max-width: 0; }
-          to { max-width: 100%; }
-        }
-        @keyframes blink {
-          0%, 50% { opacity: 0.6; }
-          51%, 100% { opacity: 0; }
-        }
-      `}</style>
-      <div style={containerStyle}>
-        <span style={typewriterStyle}>{text}</span>
-        <span style={cursorStyle}>|</span>
-      </div>
-    </>
-  );
-};
-
-const SparklineChart: FC<SparklineChartProps> = ({ similarityHash }) => {
-  const [sparklineData, setSparklineData] = useState<SparklineData | null>(null);
-
-  useEffect(() => {
-    if (similarityHash) {
-      getCoverageSparkline(similarityHash).then(data => setSparklineData(data)).catch(() => setSparklineData(null));
-    }
-  }, [similarityHash]);
-
-  if (!sparklineData || sparklineData.points.length < 2) return null;
-
-  // Generate SVG path from normalized points
-  const width = 60;
-  const height = 20;
-  const points = sparklineData.points;
-  const stepX = width / (points.length - 1);
-
-  const pathData = points.map((point, i) => {
-    const x = i * stepX;
-    const y = height - (point.normalized / 100) * height;
-    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-        <path
-          d={pathData}
-          fill="none"
-          stroke="rgba(26, 159, 255, 0.6)"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-      <span style={{ fontSize: "10px", color: "#8b8f98" }}>
-        coverage
-      </span>
-    </div>
-  );
-};
-
-export const QuickPeekCard: FC<QuickPeekCardProps> = ({ article, onClose }) => {
-  const [touchStartY, setTouchStartY] = useState<number | null>(null);
-  const [dragOffset, setDragOffset] = useState(0);
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    setTouchStartY(e.touches[0].clientY);
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (touchStartY === null) return;
-    const currentY = e.touches[0].clientY;
-    const offset = Math.max(0, currentY - touchStartY);
-    setDragOffset(offset);
-  };
-
-  const handleTouchEnd = () => {
-    if (dragOffset > 100) {
-      onClose();
-    }
-    setDragOffset(0);
-    setTouchStartY(null);
-  };
-
-  const description = article.content || "No preview available. Tap to read full article.";
-  const readTime = Math.max(1, Math.ceil(description.split(' ').length / 200));
-
-  const strippedDescription = description.replace(/<[^>]*>/g, '').substring(0, 300);
-  const displayDescription = strippedDescription.length < description.length
-    ? strippedDescription + "..."
-    : strippedDescription;
-
-  return (
-    <>
-      <div
-        style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.6)",
-          backdropFilter: "blur(5px)",
-          zIndex: 1000,
-          animation: "fadeIn 0.25s ease-out"
-        }}
-        onClick={onClose}
-      />
-
-      <div
-        style={{
-          position: "fixed",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          maxHeight: "70vh",
-          backgroundColor: "rgba(27, 40, 56, 0.98)",
-          borderRadius: "20px 20px 0 0",
-          boxShadow: "0 -4px 24px rgba(0, 0, 0, 0.5)",
-          zIndex: 1001,
-          animation: "slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
-          transform: `translateY(${dragOffset}px)`,
-          transition: dragOffset === 0 ? "transform 0.2s ease-out" : "none"
-        }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-      >
-        <div
-          style={{
-            width: "40px",
-            height: "4px",
-            backgroundColor: "rgba(255, 255, 255, 0.3)",
-            borderRadius: "2px",
-            margin: "12px auto 8px",
-            cursor: "grab"
-          }}
-        />
-        <Focusable
-          style={{
-            position: "absolute",
-            top: "10px",
-            right: "14px",
-            background: "none",
-            border: "none",
-            color: "#8b8f98",
-            fontSize: "22px",
-            lineHeight: 1,
-            padding: "4px 8px",
-            cursor: "pointer",
-            zIndex: 1002,
-          }}
-          onActivate={onClose}
-          onClick={onClose}
-        >
-          ×
-        </Focusable>
-
-        <div style={{ padding: "0 20px 20px", overflowY: "auto", maxHeight: "calc(70vh - 50px)" }}>
-          {article.image_url && (
-            <div
-              style={{
-                width: "100%",
-                height: "140px",
-                backgroundImage: `url(${article.image_url})`,
-                backgroundSize: "cover",
-                backgroundPosition: "center",
-                borderRadius: "12px",
-                marginBottom: "16px"
-              }}
-            />
-          )}
-
-          <h3
-            style={{
-              fontSize: "16px",
-              fontWeight: "600",
-              color: "#ffffff",
-              marginBottom: "10px",
-              lineHeight: "1.4"
-            }}
-          >
-            {article.title}
-          </h3>
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              marginBottom: "14px",
-              fontSize: "12px",
-              color: "#8b8f98"
-            }}
-          >
-            {article.favicon_url && (
-              <img
-                src={article.favicon_url}
-                alt=""
-                style={{ width: "16px", height: "16px", borderRadius: "2px" }}
-              />
-            )}
-            <span style={{ fontWeight: 600 }}>{article.source}</span>
-            <span>•</span>
-            <span>{formatRelativeTime(article.published)}</span>
-            <span>•</span>
-            <span>📖 {readTime} min read</span>
-          </div>
-
-          <div
-            style={{
-              fontSize: "14px",
-              lineHeight: "1.6",
-              color: "#d1d5db",
-              marginBottom: "16px"
-            }}
-          >
-            {displayDescription}
-          </div>
-
-          <button
-            onClick={() => {
-              const opened = window.open(article.link, "_blank");
-              if (!opened) {
-                if (!window.openURL?.(article.link)) {
-                  toaster.toast({ title: "Open in browser", body: article.link });
-                }
-              }
-            }}
-            style={{
-              width: "100%",
-              padding: "12px",
-              backgroundColor: "rgba(26, 159, 255, 0.15)",
-              border: "1px solid rgba(26, 159, 255, 0.4)",
-              borderRadius: "8px",
-              color: "#1a9fff",
-              fontSize: "14px",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "all 0.2s"
-            }}
-          >
-            Open Full Article →
-          </button>
-
-          <div
-            style={{
-              marginTop: "12px",
-              textAlign: "center",
-              fontSize: "11px",
-              color: "#6b7280",
-              fontStyle: "italic"
-            }}
-          >
-            Swipe down or tap outside to close
-          </div>
-        </div>
-      </div>
-
-      <style>{`
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-        @keyframes slideUp {
-          from { transform: translateY(100%); }
-          to { transform: translateY(0); }
-        }
-      `}</style>
-    </>
-  );
-};
-
-const ArticleCard = memo<ArticleCardProps>(({
-  article,
-  health,
-  viewMode,
-  isHeroItem,
-  glassmorphismOpacity,
-  showSourceIcon,
-  accentColor,
-  children
-}) => {
-  // Compute glassmorphism styles
-  const blurAmount = Math.round(glassmorphismOpacity / 10);
-  const bgOpacity = (glassmorphismOpacity / 100) * 0.05;
-
-  const cardBaseStyle = {
-    background: `rgba(255, 255, 255, ${bgOpacity + 0.03})`,
-    backdropFilter: blurAmount > 0 ? `blur(${blurAmount}px)` : 'none',
-    WebkitBackdropFilter: blurAmount > 0 ? `blur(${blurAmount}px)` : 'none',
-    border: "1px solid rgba(255, 255, 255, 0.08)",
-    borderRadius: "8px",
-    marginBottom: "12px",
-    boxShadow: "0 2px 4px rgba(0, 0, 0, 0.2)",
-    transition: "all 0.2s ease",
-  };
-
-  // Compact View
-  if (viewMode === "compact") {
-    return (
-      <div style={{ ...cardBaseStyle, padding: "8px", display: "flex", gap: "8px" }}>
-        {article.image_url && (
-          <img
-            src={article.image_url}
-            alt=""
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "4px",
-              objectFit: "cover",
-              flexShrink: 0
-            }}
-          />
-        )}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "2px" }}>
-            {showSourceIcon && article.favicon_url && (
-              <img
-                src={article.favicon_url}
-                alt=""
-                style={{ width: "14px", height: "14px", borderRadius: "50%" }}
-              />
-            )}
-            <span style={{ fontSize: "10px", fontWeight: 700, color: accentColor }}>
-              {article.source}
-            </span>
-            <span style={{ fontSize: "10px", color: "#8b8f98", marginLeft: "auto" }}>
-              {formatRelativeTime(article.published)}
-            </span>
-          </div>
-          <div
-            style={{
-              fontSize: "13px",
-              lineHeight: "1.3",
-              color: "#ffffff",
-              fontWeight: 500,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              display: "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical"
-            }}
-          >
-            {article.title}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Magazine View (Hero Layout for top 3)
-  if (viewMode === "magazine" && isHeroItem) {
-    return (
-      <div style={{ ...cardBaseStyle, padding: "0", overflow: "hidden" }}>
-        {article.image_url && (
-          <div
-            style={{
-              width: "100%",
-              height: "180px",
-              backgroundImage: `url(${article.image_url})`,
-              backgroundSize: "cover",
-              backgroundPosition: "center",
-              position: "relative"
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: "100%",
-                background: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.8) 100%)",
-                padding: "16px",
-                display: "flex",
-                flexDirection: "column",
-                justifyContent: "flex-end"
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
-                {showSourceIcon && article.favicon_url && (
-                  <img src={article.favicon_url} alt="" style={{ width: "16px", height: "16px", borderRadius: "50%" }} />
-                )}
-                <span style={{ fontSize: "11px", fontWeight: 700, color: accentColor }}>
-                  {article.source}
-                </span>
-              </div>
-              <div style={{ fontSize: "17px", lineHeight: "1.4", color: "#ffffff", fontWeight: 600 }}>
-                {article.title}
-              </div>
-            </div>
-          </div>
-        )}
-        {children && <div style={{ padding: "14px" }}>{children}</div>}
-      </div>
-    );
-  }
-
-  // Comfortable View (Default)
-  return (
-    <div style={{ ...cardBaseStyle, padding: "14px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-        {health !== "ok" && (
-          <span style={{ fontSize: "14px", color: health === "warning" ? "#ffc82c" : "#d93636" }}>
-            <FaExclamationTriangle />
-          </span>
-        )}
-        {showSourceIcon && article.favicon_url && (
-          <img src={article.favicon_url} alt="" style={{ width: "14px", height: "14px", borderRadius: "50%" }} />
-        )}
-        <span
-          style={{
-            fontSize: "11px",
-            fontWeight: 700,
-            color: accentColor,
-            textTransform: "uppercase",
-            letterSpacing: "0.5px",
-          }}
-        >
-          {article.source}
-        </span>
-        <span style={{ fontSize: "11px", color: "#8b8f98", marginLeft: "auto" }}>
-          {formatRelativeTime(article.published)}
-        </span>
-      </div>
-      <div style={{ fontSize: "15px", lineHeight: "1.5", color: "#ffffff", fontWeight: 500 }}>
-        {article.title}
-      </div>
-      {children}
-    </div>
-  );
-});
-
-// Skeleton loader component
-export const SkeletonArticle: FC = () => {
-  return (
-    <PanelSectionRow>
-      <div
-        style={{
-          background: "rgba(255, 255, 255, 0.03)",
-          border: "1px solid rgba(255, 255, 255, 0.08)",
-          borderRadius: "8px",
-          padding: "14px",
-          marginBottom: "12px",
-          animation: "shimmer 1.5s infinite"
-        }}
-      >
-        {/* Title skeleton */}
-        <div
-          style={{
-            height: "20px",
-            width: "80%",
-            backgroundColor: "rgba(255, 255, 255, 0.1)",
-            borderRadius: "4px",
-            marginBottom: "8px"
-          }}
-        />
-
-        {/* Metadata skeleton */}
-        <div
-          style={{
-            height: "14px",
-            width: "40%",
-            backgroundColor: "rgba(255, 255, 255, 0.08)",
-            borderRadius: "4px"
-          }}
-        />
-      </div>
-    </PanelSectionRow>
-  );
-};
-
-export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmStatus, settings, index, onPageChange }) => {
+export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmStatus, settings, index, onPageChange, onShowMenu, onDismiss, onMarkRead, command, onCommandDone }) => {
   const [summary, setSummary] = useState<string | null>(null);
   const [summarizing, setSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [textSource, setTextSource] = useState<SummarizeResponse["text_source"]>();
+  const [steps, setSteps] = useState<SummarizeResponse["steps"]>();
   const [expanded, setExpanded] = useState(false);
-  const [accentColor, setAccentColor] = useState<string>("#1a9fff");
+  const [open, setOpen] = useState(false);
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const autoDismissTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const [showHoverPreview, setShowHoverPreview] = useState(false);
   const [isLongPressing, setIsLongPressing] = useState(false);
+  const swipeStartXRef = useRef<number | null>(null);
+  const swipeStartYRef = useRef(0);
+  const [swipeX, setSwipeX] = useState(0);
+  const [swipeDismissing, setSwipeDismissing] = useState(false);
 
-  // Cleanup timers on unmount
   useEffect(() => {
     return () => {
       if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-      if (autoDismissTimerRef.current) clearTimeout(autoDismissTimerRef.current);
     };
   }, []);
 
 
   const handleClick = () => {
-    // Prevent normal click if long-pressing
     if (isLongPressing) {
       setIsLongPressing(false);
       return;
     }
-    const opened = window.open(article.link, "_blank");
-    if (!opened) {
-      if (!window.openURL?.(article.link)) {
-        toaster.toast({ title: "Open in browser", body: article.link });
-      }
-    }
+    if (!open) onMarkRead?.(article.link);
+    setOpen(!open);
   };
 
-  const handlePointerDown = () => {
-    if (!settings?.enableHoverPreview) return;
+  const openArticle = () => {
+    onMarkRead?.(article.link);
+    openInBrowser(article.link);
+  };
 
+  const handlePointerDown = (e: React.PointerEvent) => {
+    swipeStartXRef.current = e.clientX;
+    swipeStartYRef.current = e.clientY;
     longPressTimerRef.current = setTimeout(() => {
       setIsLongPressing(true);
-      setShowHoverPreview(true);
+      onShowMenu?.(article);
     }, settings.hoverPreviewDelay);
   };
 
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (swipeStartXRef.current === null) return;
+    const deltaX = e.clientX - swipeStartXRef.current;
+    const moved = Math.hypot(deltaX, e.clientY - swipeStartYRef.current);
+    if (moved > LONG_PRESS_MOVE_TOLERANCE_PX && longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    if (deltaX < -8) setSwipeX(Math.max(-120, deltaX));
+  };
+
   const handlePointerUp = () => {
+    const startX = swipeStartXRef.current;
+    swipeStartXRef.current = null;
+
+    if (startX !== null && swipeX < -80) {
+      setSwipeDismissing(true);
+      setTimeout(() => onDismiss?.(article.link), 250);
+      setSwipeX(0);
+      return;
+    }
+    setSwipeX(0);
+
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
 
-    // Close modal if long-pressing
     if (isLongPressing) {
-      setShowHoverPreview(false);
-      // Delay resetting isLongPressing to prevent handleClick from triggering
       setTimeout(() => setIsLongPressing(false), 100);
     }
   };
 
   const handlePointerLeave = () => {
+    swipeStartXRef.current = null;
+    setSwipeX(0);
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
   };
 
-  const handleSecondaryAction = () => {
-    if (!settings?.enableHoverPreview) return;
-
-    // Toggle preview modal
-    setShowHoverPreview(!showHoverPreview);
-
-    // Set up auto-dismiss timer (30 seconds)
-    if (!showHoverPreview) {
-      autoDismissTimerRef.current = setTimeout(() => {
-        setShowHoverPreview(false);
-      }, 30000);
-    } else {
-      // Clear timer if closing
-      if (autoDismissTimerRef.current) {
-        clearTimeout(autoDismissTimerRef.current);
-        autoDismissTimerRef.current = null;
-      }
-    }
-  };
+  const handleSecondaryAction = () => onShowMenu?.(article);
 
 
-  const handleSummarize = async (e: React.MouseEvent | CustomEvent) => {
-    if ('stopPropagation' in e) e.stopPropagation();
+  const handleSummarize = async (e?: React.MouseEvent | CustomEvent) => {
+    if (e && 'stopPropagation' in e) e.stopPropagation();
 
     if (summary) {
-      // Toggle visibility if already summarized
       setExpanded(!expanded);
       return;
     }
@@ -662,13 +131,14 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
 
       if (result.success && result.summary) {
         setSummary(result.summary);
+        setTextSource(result.text_source);
+        setSteps(result.steps);
         setExpanded(true);
         toaster.toast({
           title: "Summary Generated",
           body: "Article summary ready"
         });
       } else {
-        // Build detailed error message with diagnostics if available
         const diagnostics = result.diagnostics;
         let errorDetail = '';
         if (diagnostics) {
@@ -682,6 +152,7 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
           }
           console.error("Summarize failed:", result.error, diagnostics);
         }
+        setSteps(result.steps);
         setSummaryError((result.error || "Failed to generate summary") + errorDetail);
         toaster.toast({
           title: "Summary Failed",
@@ -698,125 +169,120 @@ export const NewsItem = memo<NewsItemProps>(({ article, health, llmEnabled, llmS
 
   const shouldShowButton = llmEnabled && llmStatus?.model_downloaded;
 
+  useEffect(() => {
+    if (command?.link !== article.link) return;
+    setOpen(true);
+    handleSummarize();
+    onCommandDone?.();
+  }, [command]);
+
   const handleButtonDown = useCallback((evt: GamepadEvent) => {
     if (evt.detail.button === GamepadButton.TRIGGER_LEFT) onPageChange(-1);
     else if (evt.detail.button === GamepadButton.TRIGGER_RIGHT) onPageChange(1);
   }, [onPageChange]);
 
-  // Extract accent color from static logo
-  useEffect(() => {
-    if (settings.accentColorSource === "automatic" && article.image_url) {
-      const cacheKey = `color_${article.source}`;
-      const cached = sessionStorage.getItem(cacheKey);
-
-      if (cached) {
-        setAccentColor(cached);
-      } else {
-        extractDominantColor(article.image_url).then(color => {
-          setAccentColor(color);
-          sessionStorage.setItem(cacheKey, color);
-        });
-      }
-    } else {
-      setAccentColor("#1a9fff");
-    }
-  }, [article.image_url, article.source, settings.accentColorSource]);
-
-  const isHeroItem = settings.uiViewMode === "magazine" && index < 3;
+  const ACCENT = "#1a9fff";
+  const text = (article.content || "").replace(/<[^>]+>/g, "").trim().slice(0, 900);
+  const btn = (bg: string, busy = false): React.CSSProperties => ({
+    padding: "7px 10px", background: bg, color: "#fff", borderRadius: "5px", fontSize: "12px",
+    fontWeight: 600, textAlign: "center", marginTop: "6px", opacity: busy ? 0.7 : 1,
+  });
 
   return (
     <PanelSectionRow>
-      <Focusable
-        onActivate={handleClick}
-        onClick={handleClick}
-        onSecondaryButton={handleSecondaryAction}
-        onPointerDown={handlePointerDown}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerLeave}
-        onButtonDown={handleButtonDown}
-      >
-        <ArticleCard
-          article={article}
-          health={health}
-          viewMode={settings.uiViewMode}
-          isHeroItem={isHeroItem}
-          glassmorphismOpacity={settings.glassmorphismOpacity}
-          showSourceIcon={settings.showSourceIcons}
-          accentColor={accentColor}
+      <div style={{
+        transform: swipeDismissing ? "translateX(-110%)" : `translateX(${swipeX}px)`,
+        opacity: swipeDismissing ? 0 : 1,
+        transition: swipeX === 0 ? "transform 0.25s ease-out, opacity 0.25s ease-out" : "none",
+        animation: `slideInRight 0.3s ease-out ${index * 40}ms both`,
+      }}>
+        <Focusable
+          onActivate={handleClick}
+          onClick={handleClick}
+          onSecondaryButton={handleSecondaryAction}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+          onPointerCancel={handlePointerLeave}
+          onButtonDown={handleButtonDown}
+          onCancelButton={(e: CustomEvent) => { if (open) { setOpen(false); e.stopPropagation(); } }}
+          style={{ userSelect: "none", padding: "5px 6px", borderLeft: `2px solid ${article.is_read ? "#444" : ACCENT}`, opacity: article.is_read ? 0.6 : 1 }}
         >
-          {article.similarity_hash && (
-            <SparklineChart
-              similarityHash={article.similarity_hash}
-            />
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "9px", color: "#8b8f98" }}>
+            {settings.showSourceIcons && article.favicon_url && (
+              <img src={article.favicon_url} alt="" style={{ width: "11px", height: "11px", borderRadius: "50%" }} />
+            )}
+            <span style={{ color: ACCENT, fontWeight: 700 }}>{article.source}</span>
+            {health !== "ok" && <FaExclamationTriangle size={9} color="#ff9f1a" />}
+            {summary && <span style={{ color: ACCENT }}>✨</span>}
+            <span style={{ marginLeft: "auto" }}>{formatRelativeTime(article.published)}</span>
+          </div>
+          <div
+            style={open
+              ? { fontSize: "13px", fontWeight: 600, color: "#fff", lineHeight: 1.3 }
+              : { fontSize: "12px", color: "#fff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+          >
+            {article.title}
+          </div>
 
-          {shouldShowButton && (
-            <div style={{ marginTop: "12px" }}>
-              <Focusable onActivate={handleSummarize} onClick={handleSummarize}>
-                <div
-                  style={{
-                    padding: "8px 12px",
-                    background: accentColor,
-                    color: "#ffffff",
-                    borderRadius: "6px",
-                    fontSize: "12px",
-                    fontWeight: 600,
-                    textAlign: "center",
-                    cursor: "pointer",
-                    opacity: summarizing ? 0.7 : 1,
-                    transition: "opacity 0.2s ease"
-                  }}
-                >
-                  {summarizing ? (
-                    <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
-                      {([
-                        { height: 8,  delay: "0s"   },
-                        { height: 14, delay: "0.2s" },
-                        { height: 6,  delay: "0.4s" },
-                      ]).map(({ height, delay }, i) => (
-                        <span key={i} style={{
-                          width: 3, height, borderRadius: 2,
-                          background: "currentColor",
-                          display: "inline-block",
-                          animation: `barWave 1.5s ease-in-out ${delay} infinite`,
-                        }} />
-                      ))}
-                      <span style={{ marginLeft: 5 }}>Summarizing</span>
-                    </span>
-                  ) : summary ? (
-                    expanded ? "Hide Summary" : "Show Summary"
-                  ) : (
-                    "Summarize"
-                  )}
-                </div>
-              </Focusable>
+          {open && (
+            <div>
+              {text && <div style={{ fontSize: "12px", lineHeight: 1.45, color: "#c6cad2", marginTop: "4px" }}>{text}</div>}
+              {article.similarity_hash && <SparklineChart similarityHash={article.similarity_hash} />}
+
+              {shouldShowButton && (
+                <Focusable onActivate={handleSummarize} onClick={handleSummarize}>
+                  <div style={btn(ACCENT, summarizing)}>
+                    {summarizing ? (
+                      <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+                        {[{ height: 8, delay: "0s" }, { height: 14, delay: "0.2s" }, { height: 6, delay: "0.4s" }].map(({ height, delay }, i) => (
+                          <span key={i} style={{
+                            width: 3, height, borderRadius: 2, background: "currentColor", display: "inline-block",
+                            animation: `barWave 1.5s ease-in-out ${delay} infinite`,
+                          }} />
+                        ))}
+                        <span style={{ marginLeft: 5 }}>Summarizing</span>
+                      </span>
+                    ) : summary ? (expanded ? "Hide Summary" : "Show Summary") : summaryError ? "Retry Summary" : "✨ Summarize"}
+                  </div>
+                </Focusable>
+              )}
 
               {expanded && summary && (
-                <div style={{ marginTop: "8px", padding: "10px", background: "rgba(0, 0, 0, 0.2)", borderRadius: "6px" }}>
-                  <TypewriterText
-                    text={summary}
-                    speed={settings.aiTypewriterSpeed}
-                    enabled={settings.aiTypewriterEnabled}
-                  />
+                <div style={{ marginTop: "6px", padding: "8px", background: "rgba(26, 159, 255, 0.1)", borderLeft: `2px solid ${ACCENT}`, borderRadius: "4px" }}>
+                  <TypewriterText text={summary} speed={settings.aiTypewriterSpeed} enabled={settings.aiTypewriterEnabled} />
+                  {textSource && (
+                    <div style={{ marginTop: "6px", fontSize: "9px", fontWeight: 700, color: textSource === "excerpt" ? "#ffd27a" : "#8b8f98" }}>
+                      {{ full: "from full article", alt: "from full article (alternate page)", excerpt: "from feed excerpt (partial)" }[textSource]}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {steps && steps.length > 0 && (textSource !== "full" || summaryError) && (
+                <div style={{ marginTop: "6px", padding: "6px", border: "1px solid #243044", borderRadius: "6px", fontSize: "11px" }}>
+                  {steps.map((st, i) => (
+                    <div key={i} style={{ color: st.status === "ok" ? "#4ade80" : st.status === "failed" ? "#ff6b6b" : "#6b7280" }}>
+                      {st.status === "ok" ? "✓" : st.status === "failed" ? "✗" : "↷"} {st.name}{st.detail ? ` - ${st.detail}` : ""}
+                    </div>
+                  ))}
                 </div>
               )}
 
               {summaryError && (
-                <div style={{ marginTop: "8px", padding: "10px", background: "rgba(211, 54, 54, 0.1)", borderRadius: "6px" }}>
-                  <div style={{ fontSize: "12px", color: "#d93636" }}>{summaryError}</div>
+                <div style={{ marginTop: "6px", padding: "8px", background: "rgba(211, 54, 54, 0.1)", borderRadius: "4px" }}>
+                  <div style={{ fontSize: "12px", color: "#d93636", whiteSpace: "pre-wrap" }}>{summaryError}</div>
                 </div>
               )}
+
+              <Focusable onActivate={openArticle} onClick={openArticle}>
+                <div style={btn("rgba(255,255,255,0.08)")}>Open in browser</div>
+              </Focusable>
             </div>
           )}
-        </ArticleCard>
-      </Focusable>
-
-      {showHoverPreview && settings?.enableHoverPreview && (
-        <QuickPeekCard
-          article={article}
-          onClose={() => setShowHoverPreview(false)}
-        />
-      )}
+        </Focusable>
+      </div>
     </PanelSectionRow>
   );
 });

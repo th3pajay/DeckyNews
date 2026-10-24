@@ -56,6 +56,8 @@ export interface SummarizeResponse {
   error: string | null;
   status: LLMStatus | null;
   diagnostics?: LoadDiagnostics;
+  text_source?: "full" | "alt" | "excerpt";
+  steps?: { name: string; status: "ok" | "failed" | "skipped"; detail: string }[];
 }
 
 export interface DownloadResponse {
@@ -73,6 +75,7 @@ export interface NewsArticle {
   image_url?: string;
   favicon_url?: string;
   similarity_hash?: string;
+  is_read?: boolean;
 }
 
 export interface SparklinePoint {
@@ -100,13 +103,10 @@ export interface HeatmapCell {
   load_duration: number | null;
   cpu_peak_temp: number | null;
   temp_delta: number | null;
-  tdp_watts: number | null;
   fan_rpm: number | null;
   energy_mwh: number | null;
   cooldown_vel: number | null;
   comp_ratio: number | null;
-  flesch_score: number | null;
-  ai_probability: number | null;
   dup_count: number | null;
   dedup_lat: number | null;
   ttl_days: number | null;
@@ -146,14 +146,13 @@ export interface Settings {
   llmEnabled: boolean;
   llmCooldownSeconds: number;
   llmResourceMonitoringEnabled: boolean;
-  uiViewMode: "compact" | "comfortable" | "magazine";
+  llmIdleTimeoutSeconds: number;
+  deduplicationEnabled: boolean;
+  deduplicationThreshold: number;
+  autoVacuumEnabled: boolean;
   showSourceIcons: boolean;
-  glassmorphismOpacity: number;
-  accentColorSource: "automatic" | "default";
-  dynamicBackdropEnabled: boolean;
   aiTypewriterEnabled: boolean;
   aiTypewriterSpeed: number;
-  enableHoverPreview: boolean;
   hoverPreviewDelay: number;
   aiPersonality: "analyst" | "tldr";
   performanceGuardEnabled: boolean;
