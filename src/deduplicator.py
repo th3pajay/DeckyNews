@@ -1,72 +1,28 @@
-"""
-Article deduplication using Levenshtein distance.
-Groups similar articles to reduce UI clutter.
-"""
-
 import hashlib
 from collections import defaultdict
-from typing import List, Dict, Optional
-from Levenshtein import distance as levenshtein_distance
+from typing import List, Dict
+from rapidfuzz import process as fuzz_process
+from rapidfuzz.distance import Levenshtein as fuzz_lev
 
 
 class ArticleDeduplicator:
-    """
-    Semantic fuzzy-matching using Levenshtein distance.
-
-    This class identifies duplicate or near-duplicate articles across
-    different sources based on title similarity. Articles within a
-    configurable edit distance threshold are grouped together.
-
-    Example:
-        - "Sony Announces PS5 Pro Release Date"
-        - "Sony announces PS5 Pro release date - Full details"
-        - Edit distance: 18 characters
-
-    The similarity hash provides fast pre-filtering before expensive
-    distance calculations.
-    """
 
     def __init__(self, similarity_threshold: int = 10):
-        """
-        Initialize deduplicator.
-
-        Args:
-            similarity_threshold: Maximum Levenshtein edit distance
-                                 to consider articles as duplicates.
-                                 Lower = stricter matching.
-                                 Typical values: 5-15
-        """
         self.threshold = similarity_threshold
 
     def calculate_similarity_hash(self, title: str) -> str:
-        """
-        Create normalized hash for fast pre-filtering.
 
-        Normalizations applied:
-        - Lowercase conversion
-        - Remove punctuation
-        - Remove common stopwords ("the", "a", "an")
-        - Sort words alphabetically
-        - Hash to 8-character hex string
-
-        Args:
-            title: Article title
-
-        Returns:
-            8-character hex hash string
-        """
-        # Normalize: lowercase + remove punctuation
         normalized = title.lower()
         normalized = ''.join(c if c.isalnum() or c.isspace() else ' ' for c in normalized)
 
-        # Remove common stopwords
+
         stopwords = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'}
         words = [w for w in normalized.split() if w and w not in stopwords]
 
-        # Sort words to make hash order-independent
+
         words = sorted(set(words))
 
-        # Create hash
+
         text = ' '.join(words)
         return hashlib.md5(text.encode()).hexdigest()[:8]
 
@@ -80,21 +36,22 @@ class ArticleDeduplicator:
         for bucket in buckets.values():
             if len(bucket) < 2:
                 continue
+
+            if len(bucket) > 50:
+                bucket = bucket[:50]
+            bucket_titles = [a['title'].lower() for a in bucket]
+            matrix = fuzz_process.cdist(bucket_titles, bucket_titles, scorer=fuzz_lev.distance)
             processed: set = set()
-            for i, article in enumerate(bucket):
+            for i in range(len(bucket)):
                 if i in processed:
                     continue
-                group = [article]
+                group = [bucket[i]]
                 processed.add(i)
-                for j, other in enumerate(bucket[i + 1:], start=i + 1):
+                for j in range(i + 1, len(bucket)):
                     if j in processed:
                         continue
-                    dist = levenshtein_distance(
-                        article['title'].lower(),
-                        other['title'].lower(),
-                    )
-                    if dist <= self.threshold:
-                        group.append(other)
+                    if matrix[i][j] <= self.threshold:
+                        group.append(bucket[j])
                         processed.add(j)
                 if len(group) > 1:
                     groups.append(group)
@@ -121,23 +78,3 @@ class ArticleDeduplicator:
             db_manager.batch_update_similarity_hashes(hash_updates)
         if coverage_updates:
             db_manager.batch_update_coverage_stats(coverage_updates)
-
-    def get_duplicate_stats(self, articles: List[Dict]) -> Dict[str, int]:
-        """
-        Get statistics about duplicates without modifying database.
-
-        Args:
-            articles: List of article dicts
-
-        Returns:
-            Dict with 'total_articles', 'duplicate_groups', 'total_duplicates'
-        """
-        groups = self.find_duplicates(articles)
-
-        total_duplicates = sum(len(group) - 1 for group in groups)
-
-        return {
-            'total_articles': len(articles),
-            'duplicate_groups': len(groups),
-            'total_duplicates': total_duplicates
-        }
